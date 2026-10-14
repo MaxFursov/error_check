@@ -6,7 +6,7 @@ import logging
 import os
 from collections import Counter, defaultdict
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -91,6 +91,13 @@ def to_csv(issues: list[Issue]) -> bytes:
     for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.code)):
         w.writerow([i.code, i.severity, RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion])
     return buf.getvalue().encode("utf-8-sig")  # BOM, щоб Excel бачив кирилицю
+
+
+def due(state: State, today: date | None = None) -> bool:
+    """Чи пора запускати перевірку: минуло CHECK_EVERY_DAYS днів з останньої успішної."""
+    every = int(os.getenv("CHECK_EVERY_DAYS", "2"))
+    passed = state.days_since_last_run(today or date.today())
+    return passed is None or passed >= every
 
 
 def run_check(source: str | None = None, dry_run: bool = False) -> list[Issue]:

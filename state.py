@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+from datetime import date
 from pathlib import Path
 
 
@@ -12,7 +13,7 @@ def name_hash(name: str) -> str:
 class State:
     def __init__(self, path: str):
         self.path = Path(path)
-        self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}}
+        self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}, "last_run": None}
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -22,6 +23,10 @@ class State:
     @property
     def first_run(self) -> bool:
         return not self.path.exists()
+
+    def days_since_last_run(self, today: date) -> int | None:
+        last = self.data.get("last_run")
+        return (today - date.fromisoformat(last)).days if last else None
 
     @property
     def prices(self) -> dict[int, float]:
@@ -54,11 +59,13 @@ class State:
     def new_issues(self, keys: list[str]) -> set[str]:
         return set(keys) - set(self.data["reported"])
 
-    def save(self, open_issue_keys: list[str], prices: dict[int, float]) -> None:
+    def save(self, open_issue_keys: list[str], prices: dict[int, float],
+             today: date | None = None) -> None:
         # Зберігаємо лише актуальні ключі: якщо помилку виправили, а потім
         # вона повернулась — про неї повідомимо знову.
         self.data["reported"] = sorted(set(open_issue_keys))
         self.data["prices"] = {str(k): v for k, v in prices.items()}
+        self.data["last_run"] = (today or date.today()).isoformat()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")

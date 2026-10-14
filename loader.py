@@ -21,6 +21,10 @@ COLUMNS = {
 }
 REQUIRED = ("code", "name", "price", "unit", "group")
 
+# Виведені позиції позначаються префіксом у назві: «_ВИВЕДЕНО…» або «Я!ВИВЕДЕНО…»
+# (а також групами, що починаються з «Я!»). Це не помилка — такі товари не перевіряємо.
+WITHDRAWN_NAME_RE = r"^\s*(?:_|Я!)\s*виведе"
+
 
 class CatalogFormatError(Exception):
     """Файл не схожий на експорт Проми (змінилась структура)."""
@@ -67,7 +71,7 @@ def read_catalog(data: bytes) -> pd.DataFrame:
     df["group"] = df["group"].fillna("").astype(str)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df["archived"] = (df["group"].str.strip().str.startswith("Я!")
-                      | df["name"].str.startswith("Я!"))
+                      | df["name"].str.contains(WITHDRAWN_NAME_RE, case=False, regex=True))
     return df.reset_index(drop=True)
 
 

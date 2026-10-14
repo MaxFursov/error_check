@@ -78,8 +78,10 @@ def test_archived_flag():
     df = loader.read_catalog(build_xlsx([
         [1, "Ковбаса А", 1, "кг", "+", "Алан", None],
         [2, "Я!ВИВЕДЕНО Ковбаса Б", 1, "кг", "-", "Алан", None],
-        [3, "Ковбаса В", 1, "кг", "-", "Я!Архів виведених кодів ", None]]))
-    assert list(df["archived"]) == [False, True, True]
+        [3, "Ковбаса В", 1, "кг", "-", "Я!Архів виведених кодів ", None],
+        [4, "_ВИВЕДЕНО", None, "шт", "-", "Алан", None],
+        [5, "_виведено Ковбаса Г", None, "кг", "-", "Алан", None]]))
+    assert list(df["archived"]) == [False, True, True, True, True]
 
 
 def test_changed_format_raises_clear_error():
