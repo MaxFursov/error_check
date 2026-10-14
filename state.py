@@ -13,7 +13,8 @@ def name_hash(name: str) -> str:
 class State:
     def __init__(self, path: str):
         self.path = Path(path)
-        self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}, "last_run": None}
+        self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}, "last_run": None,
+                     "ai_spend": {"month": "", "usd": 0.0}}
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -23,6 +24,14 @@ class State:
     @property
     def first_run(self) -> bool:
         return not self.path.exists()
+
+    def ai_spent_this_month(self, today: date | None = None) -> float:
+        month = (today or date.today()).strftime("%Y-%m")
+        spend = self.data["ai_spend"]
+        return spend["usd"] if spend["month"] == month else 0.0
+
+    def set_ai_spent(self, usd: float, today: date | None = None) -> None:
+        self.data["ai_spend"] = {"month": (today or date.today()).strftime("%Y-%m"), "usd": round(usd, 6)}
 
     def days_since_last_run(self, today: date) -> int | None:
         last = self.data.get("last_run")
@@ -59,6 +68,17 @@ class State:
     def new_issues(self, keys: list[str]) -> set[str]:
         return set(keys) - set(self.data["reported"])
 
+    def _write(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def save_cache(self) -> None:
+        """Зберігає лише результати AI та облік витрат (без reported/prices/last_run) —
+        щоб оплачена перевірка не пропадала навіть у --dry-run."""
+        self._write()
+
     def save(self, open_issue_keys: list[str], prices: dict[int, float],
              today: date | None = None) -> None:
         # Зберігаємо лише актуальні ключі: якщо помилку виправили, а потім
@@ -66,7 +86,4 @@ class State:
         self.data["reported"] = sorted(set(open_issue_keys))
         self.data["prices"] = {str(k): v for k, v in prices.items()}
         self.data["last_run"] = (today or date.today()).isoformat()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self.path)
+        self._write()

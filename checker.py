@@ -43,7 +43,8 @@ SEV_ICON = {ERROR: "🔴", WARNING: "🟠", INFO: "ℹ️"}
 SEV_ORDER = {ERROR: 0, WARNING: 1, INFO: 2}
 
 
-def collect_issues(df: pd.DataFrame, state: State) -> list[Issue]:
+def collect_issues(df: pd.DataFrame, state: State) -> tuple[list[Issue], str]:
+    """Повертає (проблеми, підсумок про витрати AI для звіту)."""
     issues = rules.run_all(df, state.prices)
 
     active = df[~df["archived"]]
@@ -51,14 +52,28 @@ def collect_issues(df: pd.DataFrame, state: State) -> list[Issue]:
     current = {c: n for c, n, _ in rows}
     limit = int(os.getenv("AI_MAX_NAMES_PER_RUN", "3000"))
     todo = state.names_to_check(rows)[:limit]
-    new_ai, done = ai_check.check_names(todo)
+    limit_usd = float(os.getenv("AI_MONTHLY_BUDGET_USD", "1.0"))
+    budget = ai_check.Budget(limit_usd, state.ai_spent_this_month())
+    new_ai, done, out_of_budget = ai_check.check_names(todo, budget)
     state.mark_checked(todo, done)
     state.remember_ai_issues([asdict(i) for i in new_ai])
+    state.set_ai_spent(budget.spent)
+    state.save_cache()  # оплачена робота не повинна пропасти, навіть у dry-run
     issues.extend(Issue(**d) for d in state.cached_ai_issues(current))
-    return issues
+
+    footer = ""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        footer = (f"🤖 Claude: цього запуску ≈${budget.used_now:.3f}, "
+                  f"за місяць ≈${budget.spent:.3f} з ліміту ${limit_usd:.2f}")
+        left = len(state.names_to_check(rows))
+        if left:
+            footer += (f"\n⏳ Ще не перевірено Claude: {left} назв"
+                       + (" (ліміт вичерпано — продовжу з наступного місяця або після збільшення "
+                          "AI_MONTHLY_BUDGET_USD)" if out_of_budget else " (продовжу наступного разу)"))
+    return issues, footer
 
 
-def format_report(issues: list[Issue], new_keys: set[str], total: int) -> str:
+def format_report(issues: list[Issue], new_keys: set[str], total: int, footer: str = "") -> str:
     new = [i for i in issues if i.key in new_keys]
     counts = Counter(i.severity for i in new)
     lines = [
@@ -81,6 +96,8 @@ def format_report(issues: list[Issue], new_keys: set[str], total: int) -> str:
             lines.append(f"• <code>{i.code}</code> {html.escape(i.name.strip()[:80])}\n   {html.escape(i.message)}{tail}")
         if len(items) > PER_RULE_LIMIT:
             lines.append(f"…і ще {len(items) - PER_RULE_LIMIT} (див. файл)")
+    if footer:
+        lines.append("\n" + html.escape(footer))
     return "\n".join(lines)
 
 
@@ -114,12 +131,12 @@ def run_check(source: str | None = None, dry_run: bool = False) -> list[Issue]:
             notifier.send_alert(f"Не вдалось завантажити/прочитати prom_export.xlsx: {e}")
         return []
 
-    issues = collect_issues(df, state)
+    issues, footer = collect_issues(df, state)
     new_keys = state.new_issues([i.key for i in issues])
     n_new = sum(1 for i in issues if i.key in new_keys)
     log.info("Проблем: %d, нових: %d", len(issues), n_new)
 
-    report = format_report(issues, new_keys, len(df))
+    report = format_report(issues, new_keys, len(df), footer)
     if dry_run:
         print(html.unescape(report))
         return issues

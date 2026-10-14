@@ -5,21 +5,26 @@ from state import State
 
 
 class FakeClient:
-    def __init__(self, text):
-        self.messages = SimpleNamespace(create=lambda **kw: SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=text)]))
+    def __init__(self, text, in_tok=3000, out_tok=200):
+        self.calls = 0
+
+        def create(**kw):
+            self.calls += 1
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)],
+                                   usage=SimpleNamespace(input_tokens=in_tok, output_tokens=out_tok))
+        self.messages = SimpleNamespace(create=create)
 
 
 def test_ai_response_parsed_and_invented_codes_dropped():
     reply = ('Ось результат:\n[{"code": 5, "problem": "Друкарська помилка: Camambert", '
              '"suggestion": "Camembert", "severity": "error"},'
              ' {"code": 999, "problem": "вигадано", "severity": "error"}]')
-    issues = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г")])
+    issues, in_tok, out_tok = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г")])
     assert [(i.code, i.severity, i.suggestion) for i in issues] == [(5, "error", "Camembert")]
 
 
 def test_ai_garbage_reply_is_ignored():
-    assert ai_check.check_batch(FakeClient("все гаразд"), "m", [(1, "Сир", "Г")]) == []
+    assert ai_check.check_batch(FakeClient("все гаразд"), "m", [(1, "Сир", "Г")])[0] == []
 
 
 def test_state_only_rechecks_new_or_changed_names(tmp_path):
@@ -40,3 +45,33 @@ def test_fixed_issue_is_reported_again_if_it_returns(tmp_path):
     assert State(str(tmp_path / "s.json")).new_issues(["a"]) == set()
     st.save([], {})  # виправили
     assert State(str(tmp_path / "s.json")).new_issues(["a"]) == {"a"}
+
+
+def test_budget_counts_real_usage_and_stops_before_exceeding(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    client = FakeClient("[]", in_tok=10_000, out_tok=1_000)   # 0.03 + 0.015 = $0.045 за порцію
+    monkeypatch.setattr(ai_check, "_client", lambda: client)
+    items = [(i, f"Сир Тест {i}", "Г") for i in range(ai_check.BATCH_SIZE * 10)]
+    budget = ai_check.Budget(limit_usd=0.20)
+    issues, done, out_of_budget = ai_check.check_names(items, budget)
+    assert out_of_budget and client.calls < 10            # не пройшли всі 10 порцій
+    assert budget.spent <= 0.20                            # ліміт ніколи не перевищено
+    assert len(done) == client.calls * ai_check.BATCH_SIZE # недоперевірені не позначені як готові
+
+
+def test_budget_already_spent_makes_no_calls(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    client = FakeClient("[]")
+    monkeypatch.setattr(ai_check, "_client", lambda: client)
+    _, done, out_of_budget = ai_check.check_names([(1, "Сир Тест", "Г")], ai_check.Budget(1.0, spent_usd=0.999))
+    assert client.calls == 0 and out_of_budget and not done
+
+
+def test_spend_is_tracked_per_month(tmp_path):
+    from datetime import date
+    st = State(str(tmp_path / "s.json"))
+    st.set_ai_spent(0.42, today=date(2026, 10, 14))
+    st.save_cache()
+    st = State(str(tmp_path / "s.json"))
+    assert st.ai_spent_this_month(date(2026, 10, 30)) == 0.42
+    assert st.ai_spent_this_month(date(2026, 11, 1)) == 0.0   # новий місяць — новий ліміт
