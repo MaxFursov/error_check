@@ -5,26 +5,29 @@ from state import State
 
 
 class FakeClient:
-    def __init__(self, text, in_tok=3000, out_tok=200):
+    def __init__(self, text, in_tok=3000, out_tok=200, stop_reason="end_turn"):
         self.calls = 0
 
         def create(**kw):
             self.calls += 1
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)],
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason=stop_reason,
                                    usage=SimpleNamespace(input_tokens=in_tok, output_tokens=out_tok))
         self.messages = SimpleNamespace(create=create)
 
 
 def test_ai_response_parsed_and_invented_codes_dropped():
-    reply = ('Ось результат:\n[{"code": 5, "problem": "Друкарська помилка: Camambert", '
-             '"suggestion": "Camembert", "severity": "error"},'
-             ' {"code": 999, "problem": "вигадано", "severity": "error"}]')
-    issues, in_tok, out_tok = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г")])
-    assert [(i.code, i.severity, i.suggestion) for i in issues] == [(5, "error", "Camembert")]
+    reply = ("2680 | Camambert → Camembert | друкарська помилка\n"
+             "5 | Camambert → Camembert | друкарська помилка\n"
+             "999 | щось → інше | вигадано\n"
+             "5 | сир → сир | нічого не змінює")
+    issues, *_ = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г"), (2680, "Сир Camambert GRIL", "Г")])
+    assert sorted((i.code, i.suggestion) for i in issues) == [
+        (5, "Camambert → Camembert"), (2680, "Camambert → Camembert")]
 
 
-def test_ai_garbage_reply_is_ignored():
-    assert ai_check.check_batch(FakeClient("все гаразд"), "m", [(1, "Сир", "Г")])[0] == []
+def test_ai_none_and_prose_replies_give_no_issues():
+    for reply in ("NONE", "все гаразд", "```json\n[]\n```"):
+        assert ai_check.check_batch(FakeClient(reply), "m", [(1, "Сир", "Г")])[0] == []
 
 
 def test_state_only_rechecks_new_or_changed_names(tmp_path):
@@ -75,3 +78,26 @@ def test_spend_is_tracked_per_month(tmp_path):
     st = State(str(tmp_path / "s.json"))
     assert st.ai_spent_this_month(date(2026, 10, 30)) == 0.42
     assert st.ai_spent_this_month(date(2026, 11, 1)) == 0.0   # новий місяць — новий ліміт
+
+
+def test_truncated_response_is_not_marked_done_and_run_stops(monkeypatch):
+    """Регресія: відповідь, обрізана по max_tokens, давала [] і назви вважались перевіреними,
+    а гроші витрачались даремно."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    client = FakeClient("1 | Сир → Сир", in_tok=3000, out_tok=1200, stop_reason="max_tokens")
+    monkeypatch.setattr(ai_check, "_client", lambda: client)
+    items = [(i, f"Сир Тест {i}", "Г") for i in range(ai_check.BATCH_SIZE * 5)]
+    budget = ai_check.Budget(limit_usd=10)
+    issues, done, out_of_budget = ai_check.check_names(items, budget)
+    assert done == set() and issues == []
+    assert client.calls == 2                 # зупинились після двох обрізань поспіль
+    assert budget.spent > 0                  # але витрати враховано
+
+
+def test_thinking_is_disabled(monkeypatch):
+    seen = {}
+    client = FakeClient("[]")
+    orig = client.messages.create
+    client.messages.create = lambda **kw: (seen.update(kw), orig(**kw))[1]
+    ai_check.check_batch(client, "m", [(1, "Сир Тест", "Г")])
+    assert seen["thinking"] == {"type": "disabled"}

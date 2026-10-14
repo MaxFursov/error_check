@@ -1,17 +1,16 @@
 """Перевірка назв за допомогою Claude: орфографія, 'вік замість бренду', безглуздя.
 Викликається лише для нових або змінених назв (результат кешується в стані)."""
-import json
 import logging
 import os
 import re
 from pathlib import Path
 
-from rules import Issue, WARNING, ERROR
+from rules import Issue, ERROR
 
 log = logging.getLogger(__name__)
 
 BATCH_SIZE = 80
-MAX_OUTPUT_TOKENS = 2000
+MAX_OUTPUT_TOKENS = 1200
 CONTEXT = (Path(__file__).parent / "company_context.txt").read_text(encoding="utf-8")
 
 SYSTEM = f"""Ти — коректор каталогу товарів оптового постачальника харчових продуктів.
@@ -19,12 +18,19 @@ SYSTEM = f"""Ти — коректор каталогу товарів опто�
 
 {CONTEXT}
 
-ПРАВИЛА ВІДПОВІДІ:
-- Відповідай ЛИШЕ валідним JSON-масивом, без пояснень і markdown.
-- Для кожної назви з помилкою: {{"code": <код>, "problem": "<що не так, 1 речення українською>",
-  "suggestion": "<як виправити, або порожній рядок>", "severity": "error" | "warning"}}
-- severity "error" — безсумнівна помилка (друкарська помилка, безглузде слово); "warning" — підозріло, потрібна перевірка людиною.
-- Якщо помилок немає — поверни [].
+ФОРМАТ ВІДПОВІДІ — суворо один рядок на помилку, без JSON, без markdown, без вступів:
+код | слово_з_помилкою → правильне_слово | чому (2–6 слів)
+Приклади:
+2680 | Camambert → Camembert | друкарська помилка
+1910 | Пармеза → Пармезан | друкарська помилка
+2323 | YOUNG → вік сиру, не ТМ | вік замість виробника
+Якщо помилок у порції немає — відповідай одним словом: NONE
+
+ПРАВИЛА:
+- ПОВІДОМЛЯЙ ЛИШЕ коли впевнений щонайменше на 90% і можеш дати КОНКРЕТНЕ виправлення після «→».
+- НЕ повідомляй про: відсутність ТМ/виробника, фасування чи жирності; регістр літер; різні варіанти
+  транслітерації (Прошуто/Прошутто, Чорізо); сумніви щодо відповідності групі чи типу продукту;
+  бренди, яких ти просто не знаєш; "потребує перевірки". Це не помилки.
 - Краще пропустити сумнівний випадок, ніж видати хибну тривогу. Не вигадуй проблем."""
 
 
@@ -33,16 +39,17 @@ def _client():
     return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
-def _parse(text: str) -> list[dict]:
-    text = text.strip()
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group())
-    except json.JSONDecodeError:
-        return []
-    return [d for d in data if isinstance(d, dict) and "code" in d and "problem" in d]
+LINE_RE = re.compile(r"^\s*(\d+)\s*\|\s*(.+?)\s*(?:→|->)\s*(.+?)\s*(?:\|\s*(.*?))?\s*$")
+
+
+def _parse(text: str) -> list[tuple[int, str, str, str]]:
+    """Рядки `код | було → має бути | чому` -> [(код, було, має_бути, чому)]."""
+    out = []
+    for line in text.splitlines():
+        m = LINE_RE.match(line)
+        if m:
+            out.append((int(m.group(1)), m.group(2), m.group(3), m.group(4) or ""))
+    return out
 
 
 class Budget:
@@ -76,26 +83,26 @@ class Budget:
 
 
 def check_batch(client, model: str, items: list[tuple[int, str, str]]):
-    """items: (code, name, group). Повертає (проблеми, вхідні токени, вихідні токени)."""
+    """items: (code, name, group). Повертає (проблеми, вхідні токени, вихідні токени,
+    чи обрізано відповідь). Обрізана відповідь = JSON неповний, порцію не можна вважати перевіреною."""
     listing = "\n".join(f"{code} | {name.strip()} | група: {group.strip()}"
                         for code, name, group in items)
     resp = client.messages.create(
         model=model, max_tokens=MAX_OUTPUT_TOKENS, system=SYSTEM,
+        # без "міркування": воно з'їдає вихідні токени (гроші) і обрізає відповідь
+        thinking={"type": "disabled"},
         messages=[{"role": "user", "content": listing}])
     names = {code: name for code, name, _ in items}
     out = []
-    for d in _parse("".join(b.text for b in resp.content if b.type == "text")):
-        try:
-            code = int(d["code"])
-        except (TypeError, ValueError):
-            continue
-        if code not in names:
-            continue  # модель вигадала код
-        sev = ERROR if d.get("severity") == "error" else WARNING
-        out.append(Issue(code, names[code], "ai_review", sev,
-                         str(d["problem"]).strip(), str(d.get("suggestion", "")).strip()))
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    for code, wrong, right, why in _parse(text):
+        if code not in names or wrong == right:
+            continue  # модель вигадала код або "виправила" на те саме
+        out.append(Issue(code, names[code], "ai_review", ERROR,
+                         f"«{wrong}»: {why or 'ймовірна помилка'}", f"{wrong} → {right}"))
     usage = getattr(resp, "usage", None)
-    return (out, getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0)
+    truncated = getattr(resp, "stop_reason", None) == "max_tokens"
+    return (out, getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0, truncated)
 
 
 def check_names(items: list[tuple[int, str, str]], budget: Budget):
@@ -111,6 +118,7 @@ def check_names(items: list[tuple[int, str, str]], budget: Budget):
     issues: list[Issue] = []
     done: set[int] = set()
     out_of_budget = False
+    truncated_in_row = 0
     for i in range(0, len(items), BATCH_SIZE):
         batch = items[i:i + BATCH_SIZE]
         chars = len(SYSTEM) + sum(len(n) + len(g) + 12 for _, n, g in batch)
@@ -120,8 +128,17 @@ def check_names(items: list[tuple[int, str, str]], budget: Budget):
                         "лишилось %d назв", budget.limit, budget.spent, len(items) - i)
             break
         try:
-            found, in_tok, out_tok = check_batch(client, model, batch)
-            budget.add(in_tok, out_tok)
+            found, in_tok, out_tok, truncated = check_batch(client, model, batch)
+            budget.add(in_tok, out_tok)  # гроші витрачено в будь-якому разі
+            if truncated:
+                truncated_in_row += 1
+                log.error("AI: відповідь на порцію %d–%d обрізана (max_tokens) — порцію "
+                          "не зараховано, перевірю наступного разу", i, i + len(batch))
+                if truncated_in_row >= 2:
+                    log.error("AI: дві обрізані відповіді поспіль — зупиняюсь, щоб не палити токени")
+                    break
+                continue
+            truncated_in_row = 0
             issues.extend(found)
             done.update(code for code, _, _ in batch)
         except Exception as e:  # мережа, ліміти, модель недоступна
