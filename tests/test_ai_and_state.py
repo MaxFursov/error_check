@@ -134,3 +134,17 @@ def test_real_corrections_pass_filter():
             ("Сир PRO MILR ванночка", "PRO MILR", "PRO MILK", "")]
     for name, wrong, right, why in good:
         assert ai_check.is_plausible(name, wrong, right, why), (wrong, right)
+
+
+def test_seed_state_is_used_on_first_start_only(tmp_path, monkeypatch):
+    import json
+    import state as state_mod
+    seed = tmp_path / "seed.json"
+    seed.write_text(json.dumps({"ai_checked": {"1": state_mod.name_hash("Сир А")}, "ai_spend": {"month": "2026-10", "usd": 1.4}}))
+    monkeypatch.setattr(state_mod, "SEED_PATH", seed)
+    st = state_mod.State(str(tmp_path / "s.json"))
+    assert st.seeded and st.names_to_check([(1, "Сир А", "Г"), (2, "Сир Б", "Г")]) == [(2, "Сир Б", "Г")]
+    assert st.days_since_last_run(__import__("datetime").date.today()) is None   # перший звіт піде одразу
+    st.save([], {})                                    # після першого збереження живемо своїм станом
+    seed.write_text("{}")
+    assert state_mod.State(str(tmp_path / "s.json")).data["ai_checked"]

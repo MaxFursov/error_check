@@ -10,12 +10,24 @@ def name_hash(name: str) -> str:
     return hashlib.sha1(name.strip().encode("utf-8")).hexdigest()[:12]
 
 
+SEED_PATH = Path(__file__).parent / "state_seed.json"
+
+
 class State:
     def __init__(self, path: str):
         self.path = Path(path)
         self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}, "last_run": None,
                      "ai_spend": {"month": "", "usd": 0.0}}
-        if self.path.exists():
+        self.seeded = False
+        if not self.path.exists() and SEED_PATH.exists():
+            # Перший запуск на новому сервері: беремо готовий кеш перевірених назв
+            # і облік витрат, щоб не платити Claude за ті самі назви вдруге.
+            try:
+                self.data.update(json.loads(SEED_PATH.read_text(encoding="utf-8")))
+                self.seeded = True
+            except (json.JSONDecodeError, OSError):
+                pass
+        elif self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):
@@ -23,7 +35,7 @@ class State:
 
     @property
     def first_run(self) -> bool:
-        return not self.path.exists()
+        return not self.path.exists() and not self.seeded
 
     def ai_spent_this_month(self, today: date | None = None) -> float:
         month = (today or date.today()).strftime("%Y-%m")
