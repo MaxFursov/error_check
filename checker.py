@@ -59,7 +59,10 @@ def collect_issues(df: pd.DataFrame, state: State) -> tuple[list[Issue], str]:
     state.remember_ai_issues([asdict(i) for i in new_ai])
     state.set_ai_spent(budget.spent)
     state.save_cache()  # оплачена робота не повинна пропасти, навіть у dry-run
-    issues.extend(Issue(**d) for d in state.cached_ai_issues(current))
+    uids = {int(r.code): int(r.uid) for r in active.itertuples() if not pd.isna(r.uid)}
+    for d in state.cached_ai_issues(current):
+        d = {**d, "uid": uids.get(d["code"])}   # ID для показу беремо з поточного файлу
+        issues.append(Issue(**d))
 
     footer = ""
     if os.getenv("ANTHROPIC_API_KEY"):
@@ -79,7 +82,7 @@ TG_LIMIT = 3900  # одне повідомлення Telegram — до 4096 си
 
 def _example(i: Issue) -> str:
     detail = i.suggestion if i.suggestion else i.message
-    return (f"• <code>{i.code}</code> {html.escape(i.name.strip()[:45])}\n"
+    return (f"• <code>{i.ident}</code> {html.escape(i.name.strip()[:45])}\n"
             f"   ↳ <i>{html.escape(detail[:90])}</i>")
 
 
@@ -132,10 +135,10 @@ def format_report(issues: list[Issue], new_keys: set[str], total: int, footer: s
 def to_csv(issues: list[Issue], new_keys: set[str] | None = None) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Код", "Нова", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція"])
-    for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.code)):
-        w.writerow([i.code, "так" if new_keys is None or i.key in new_keys else "ні", i.severity,
-                    RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion])
+    w.writerow(["ID", "Нова", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція", "Код_товару"])
+    for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.ident)):
+        w.writerow([i.ident, "так" if new_keys is None or i.key in new_keys else "ні", i.severity,
+                    RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion, i.code])
     return buf.getvalue().encode("utf-8-sig")  # BOM, щоб Excel бачив кирилицю
 
 

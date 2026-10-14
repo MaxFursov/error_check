@@ -47,3 +47,16 @@ def test_files_are_new_errors_plus_all_open():
 def test_single_file_when_everything_is_new():
     i = Issue(1, "Назва", "short_name", ERROR, "x")
     assert len(checker.build_files([i], {i.key})) == 1
+
+
+def test_report_and_files_show_unique_id_not_internal_code():
+    i = Issue(514, "Cир плавлений", "mixed_alphabet", ERROR, "змішано", "Cир → Сир", uid=184)
+    text = checker.format_report([i], {i.key}, 10)
+    assert "<code>184</code>" in text and "<code>514</code>" not in text
+    csv_text = checker.to_csv([i], {i.key}).decode("utf-8-sig").splitlines()
+    assert csv_text[0].startswith("ID,") and csv_text[1].startswith("184,") and csv_text[1].endswith(",514")
+
+
+def test_falls_back_to_code_when_no_unique_id():
+    i = Issue(542, "Ковбаса Київська", "short_name", ERROR, "x")      # uid немає (напр., архівний рядок)
+    assert i.ident == 542 and "<code>542</code>" in checker.format_report([i], {i.key}, 1)

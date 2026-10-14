@@ -42,11 +42,27 @@ class Issue:
     severity: str
     message: str
     suggestion: str = ""
+    uid: int | None = None   # «Унікальний_ідентифікатор» — ID, який бачить користувач
+
+    @property
+    def ident(self) -> int:
+        """ID для показу: Унікальний_ідентифікатор, а якщо його немає — Код_товару."""
+        return self.uid if self.uid is not None else self.code
 
     @property
     def key(self) -> str:
         """Стабільний ключ, щоб не повідомляти про одну й ту саму помилку двічі."""
         return f"{self.code}|{self.rule}|{self.message}"
+
+
+def _uid(r) -> int | None:
+    v = getattr(r, "uid", None)
+    return None if v is None or pd.isna(v) else int(v)
+
+
+def mk(r, rule: str, severity: str, message: str, suggestion: str = "") -> "Issue":
+    """Створює Issue для рядка таблиці r (з ID товару)."""
+    return Issue(r.code, r.name, rule, severity, message, suggestion, uid=_uid(r))
 
 
 def _active(df: pd.DataFrame) -> pd.DataFrame:
@@ -62,13 +78,13 @@ def check_missing_price(df: pd.DataFrame) -> list[Issue]:
     for r in _active(df).itertuples():
         if pd.isna(r.price) or r.price <= 0:
             sev = ERROR if r.available == "+" else WARNING
-            out.append(Issue(r.code, r.name, "missing_price", sev,
+            out.append(mk(r, "missing_price", sev,
                              "Не вказано ціну" + (" (товар у наявності!)" if sev == ERROR else "")))
     return out
 
 
 def check_short_name(df: pd.DataFrame) -> list[Issue]:
-    return [Issue(r.code, r.name, "short_name", ERROR,
+    return [mk(r, "short_name", ERROR,
                   "Назва занадто коротка або порожня")
             for r in _active(df).itertuples()
             if len(r.name.strip()) < 8 or len(r.name.split()) < 2]
@@ -77,7 +93,7 @@ def check_short_name(df: pd.DataFrame) -> list[Issue]:
 def check_duplicate_code(df: pd.DataFrame) -> list[Issue]:
     act = _active(df)
     dup = act[act["code"].duplicated(keep=False)]
-    return [Issue(r.code, r.name, "duplicate_code", ERROR, "Код товару повторюється")
+    return [mk(r, "duplicate_code", ERROR, f"Повторюється код товару {r.code} (колонка «Код_товару»)")
             for r in dup.itertuples()]
 
 
@@ -93,9 +109,9 @@ def check_duplicate_name(df: pd.DataFrame) -> list[Issue]:
         if len(codes) < 2:
             continue
         for r in grp.itertuples():
-            others = ", ".join(str(c) for c in codes if c != r.code)
-            out.append(Issue(r.code, r.name, "duplicate_name", WARNING,
-                             f"Така сама назва в іншого товару (код {others})"))
+            others = ", ".join(str(_uid(o) or o.code) for o in grp.itertuples() if o.code != r.code)
+            out.append(mk(r, "duplicate_name", WARNING,
+                             f"Така сама назва в іншого товару (ID {others})"))
     return out
 
 
@@ -128,12 +144,12 @@ def check_mixed_alphabet(df: pd.DataFrame) -> list[Issue]:
                 continue
             fix = _fix_word(word)
             if fix:
-                out.append(Issue(r.code, r.name, "mixed_alphabet", ERROR,
+                out.append(mk(r, "mixed_alphabet", ERROR,
                                  f"У слові «{word}» змішано кирилицю й латиницю — "
                                  f"на око непомітно, але пошук такого слова не знайде",
                                  f"{word} → {fix}"))
             else:
-                out.append(Issue(r.code, r.name, "mixed_alphabet", WARNING,
+                out.append(mk(r, "mixed_alphabet", WARNING,
                                  f"У слові «{word}» змішано кирилицю й латиницю — перевірте"))
     return out
 
@@ -151,7 +167,7 @@ def check_quotes_brackets(df: pd.DataFrame) -> list[Issue]:
         if n.count("(") != n.count(")"):
             problems.append("незакрита дужка")
         if problems:
-            out.append(Issue(r.code, r.name, "quotes_brackets", ERROR,
+            out.append(mk(r, "quotes_brackets", ERROR,
                              "Пошкоджена розмітка назви: " + ", ".join(problems)))
     return out
 
@@ -161,7 +177,7 @@ def check_percent(df: pd.DataFrame) -> list[Issue]:
     for r in _active(df).itertuples():
         for m in re.findall(r"(\d+(?:[.,]\d+)?)\s*%", r.name):
             if float(m.replace(",", ".")) > 100:
-                out.append(Issue(r.code, r.name, "percent", ERROR,
+                out.append(mk(r, "percent", ERROR,
                                  f"Жирність/відсоток {m}% більший за 100"))
     return out
 
@@ -191,19 +207,19 @@ def check_descriptor_as_brand(df: pd.DataFrame) -> list[Issue]:
 
 def check_archive_state(df: pd.DataFrame) -> list[Issue]:
     arch = df[df["archived"] & (df["available"] == "+")]
-    return [Issue(r.code, r.name, "archived_in_stock", WARNING,
+    return [mk(r, "archived_in_stock", WARNING,
                   "Товар у групі-архіві, але позначений як «в наявності»")
             for r in arch.itertuples()]
 
 
 def check_missing_image(df: pd.DataFrame) -> list[Issue]:
     act = _active(df)
-    return [Issue(r.code, r.name, "missing_image", INFO, "Немає фото")
+    return [mk(r, "missing_image", INFO, "Немає фото")
             for r in act[act["image"].isna() & (act["available"] == "+")].itertuples()]
 
 
 def check_whitespace(df: pd.DataFrame) -> list[Issue]:
-    return [Issue(r.code, r.name, "whitespace", INFO, "Зайві пробіли в назві",
+    return [mk(r, "whitespace", INFO, "Зайві пробіли в назві",
                   re.sub(r"\s+", " ", r.name).strip())
             for r in _active(df).itertuples()
             if r.name != r.name.strip() or "  " in r.name]
@@ -214,7 +230,7 @@ GLUED_RE = re.compile(f'{LETTERS}"{LETTERS}|\\d(?:кг|г|гр){LETTERS}')
 
 def check_glued_words(df: pd.DataFrame) -> list[Issue]:
     """Пропущений пробіл: '"Gudbrand"традиційний', '0,08кгТМ'."""
-    return [Issue(r.code, r.name, "glued_words", INFO, "Пропущено пробіл у назві")
+    return [mk(r, "glued_words", INFO, "Пропущено пробіл у назві")
             for r in _active(df).itertuples() if GLUED_RE.search(r.name)]
 
 
@@ -263,7 +279,7 @@ def check_price_jumps(df: pd.DataFrame, prev_prices: dict[int, float],
         if old and not pd.isna(r.price) and old > 0:
             change = (r.price - old) / old
             if abs(change) >= threshold:
-                out.append(Issue(r.code, r.name, "price_jump", WARNING,
+                out.append(mk(r, "price_jump", WARNING,
                                  f"Ціна змінилась на {change:+.0%}: {old:g} → {r.price:g} грн"))
     return out
 

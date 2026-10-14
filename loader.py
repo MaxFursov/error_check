@@ -10,7 +10,8 @@ log = logging.getLogger(__name__)
 
 # Колонки файлу -> внутрішні назви
 COLUMNS = {
-    "Код_товару": "code",
+    "Унікальний_ідентифікатор": "uid",   # ID товару — його й показуємо людям
+    "Код_товару": "code",                # внутрішній код; лишається службовим ключем бота
     "Назва_позиції": "name",
     "Ціна": "price",
     "Одиниця_виміру": "unit",
@@ -52,7 +53,7 @@ def _fix_zip_case(data: bytes) -> bytes:
 
 
 def read_catalog(data: bytes) -> pd.DataFrame:
-    """Повертає DataFrame з колонками code, name, price, unit, image,
+    """Повертає DataFrame з колонками uid (ID товару), code, name, price, unit, image,
     available, qty, group + archived (bool)."""
     raw = pd.read_excel(io.BytesIO(_fix_zip_case(data)), engine="openpyxl")
     missing = [c for c in COLUMNS if c in ("Код_товару", "Назва_позиції", "Ціна",
@@ -67,6 +68,7 @@ def read_catalog(data: bytes) -> pd.DataFrame:
             df[col] = None
     df = df.dropna(subset=["code"]).copy()
     df["code"] = df["code"].astype(int)
+    df["uid"] = pd.to_numeric(df["uid"], errors="coerce").astype("Int64")
     df["name"] = df["name"].fillna("").astype(str)
     df["group"] = df["group"].fillna("").astype(str)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")

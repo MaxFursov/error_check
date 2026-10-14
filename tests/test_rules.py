@@ -6,6 +6,7 @@ import rules
 def make(*rows):
     """rows: (code, name, price, unit, group, available)"""
     df = pd.DataFrame(rows, columns=["code", "name", "price", "unit", "group", "available"])
+    df["uid"] = df["code"] * 10 + 1          # ID товару відрізняється від коду
     df["image"] = "http://img"
     df["qty"] = None
     df["archived"] = df["group"].str.startswith("Я!")
@@ -109,3 +110,12 @@ def test_whitespace_is_info_only():
     df = make((1, "Сир  Гауда 45% ", 100, "кг", "Г", "+"))
     [issue] = found(df, "whitespace")
     assert issue.severity == rules.INFO and issue.suggestion == "Сир Гауда 45%"
+
+
+def test_issues_carry_unique_id_and_duplicate_name_points_to_other_id():
+    df = make((1, "Ковбаса Київська с/к Довгошия", 380, "кг", "Довгошия", "+"),
+              (2, "Ковбаса  «Київська» с/к Довгошия", 380, "кг", "Довгошия", "+"))
+    issues = found(df, "duplicate_name")
+    by_code = {i.code: i for i in issues}
+    assert by_code[1].uid == 11 and by_code[2].uid == 21
+    assert "ID 21" in by_code[1].message and "ID 11" in by_code[2].message
