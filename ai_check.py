@@ -1,6 +1,7 @@
 """Перевірка назв за допомогою Claude: орфографія, 'вік замість бренду', безглуздя.
 Викликається лише для нових або змінених назв (результат кешується в стані)."""
 import logging
+from dataclasses import dataclass
 import os
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ from rules import Issue, ERROR
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = 80
+BATCH_SIZE = 40
 MAX_OUTPUT_TOKENS = 1200
 CONTEXT = (Path(__file__).parent / "company_context.txt").read_text(encoding="utf-8")
 
@@ -34,6 +35,7 @@ SYSTEM = f"""Ти — коректор каталогу товарів опто�
 - Краще пропустити сумнівний випадок, ніж видати хибну тривогу. Не вигадуй проблем.
 - Якщо не впевнений або виправлення немає — НЕ пиши рядок взагалі. Ніколи не пиши в рядках "NONE",
   "без змін", "пропускаю", "не впевнений", "ок" — такі рядки заборонені.
+- Не більше 15 рядків на порцію: обирай лише найвпевненіші випадки.
 - "слово_з_помилкою" — лише одне слово або коротка фраза (до 4 слів), ніколи не вся назва."""
 
 
@@ -108,9 +110,19 @@ class Budget:
         self.spent += self.cost(in_tok, out_tok)
 
 
-def check_batch(client, model: str, items: list[tuple[int, str, str]]):
-    """items: (code, name, group). Повертає (проблеми, вхідні токени, вихідні токени,
-    чи обрізано відповідь). Обрізана відповідь = JSON неповний, порцію не можна вважати перевіреною."""
+@dataclass
+class BatchResult:
+    issues: list
+    in_tok: int
+    out_tok: int
+    truncated: bool
+    covered: set  # коди, які модель точно встигла переглянути
+
+
+def check_batch(client, model: str, items: list[tuple[int, str, str]]) -> BatchResult:
+    """items: (code, name, group). Якщо відповідь обрізана (max_tokens), порція зарахована лише
+    частково: модель відповідає в порядку вхідного списку, тож усе до останнього згаданого коду
+    (не включно — рядок міг обірватись) вважається переглянутим, решта піде наступного разу."""
     listing = "\n".join(f"{code} | {name.strip()} | група: {group.strip()}"
                         for code, name, group in items)
     resp = client.messages.create(
@@ -119,16 +131,25 @@ def check_batch(client, model: str, items: list[tuple[int, str, str]]):
         thinking={"type": "disabled"},
         messages=[{"role": "user", "content": listing}])
     names = {code: name for code, name, _ in items}
-    out = []
+    order = [code for code, _, _ in items]
     text = "".join(b.text for b in resp.content if b.type == "text")
-    for code, wrong, right, why in _parse(text):
+    parsed = _parse(text)
+    truncated = getattr(resp, "stop_reason", None) == "max_tokens"
+    if truncated:
+        mentioned = [order.index(c) for c, *_ in parsed if c in names]
+        covered = set(order[:max(mentioned)]) if mentioned else set()
+        parsed = [p for p in parsed if p[0] in covered]
+    else:
+        covered = set(order)
+    out = []
+    for code, wrong, right, why in parsed:
         if code not in names or not is_plausible(names[code], wrong, right, why):
             continue  # модель вигадала код або видала рядок без реального виправлення
         out.append(Issue(code, names[code], "ai_review", ERROR,
                          f"«{wrong}»: {why or 'ймовірна помилка'}", f"{wrong} → {right}"))
     usage = getattr(resp, "usage", None)
-    truncated = getattr(resp, "stop_reason", None) == "max_tokens"
-    return (out, getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0, truncated)
+    return BatchResult(out, getattr(usage, "input_tokens", 0) or 0,
+                       getattr(usage, "output_tokens", 0) or 0, truncated, covered)
 
 
 def check_names(items: list[tuple[int, str, str]], budget: Budget):
@@ -154,19 +175,20 @@ def check_names(items: list[tuple[int, str, str]], budget: Budget):
                         "лишилось %d назв", budget.limit, budget.spent, len(items) - i)
             break
         try:
-            found, in_tok, out_tok, truncated = check_batch(client, model, batch)
-            budget.add(in_tok, out_tok)  # гроші витрачено в будь-якому разі
-            if truncated:
-                truncated_in_row += 1
-                log.error("AI: відповідь на порцію %d–%d обрізана (max_tokens) — порцію "
-                          "не зараховано, перевірю наступного разу", i, i + len(batch))
+            res = check_batch(client, model, batch)
+            budget.add(res.in_tok, res.out_tok)  # гроші витрачено в будь-якому разі
+            issues.extend(res.issues)
+            done.update(res.covered)
+            if res.truncated:
+                log.warning("AI: відповідь на порцію %d–%d обрізана — зараховано %d з %d назв",
+                            i, i + len(batch), len(res.covered), len(batch))
+                truncated_in_row = truncated_in_row + 1 if not res.covered else 0
                 if truncated_in_row >= 2:
-                    log.error("AI: дві обрізані відповіді поспіль — зупиняюсь, щоб не палити токени")
+                    log.error("AI: дві порції поспіль без жодного результату — зупиняюсь, "
+                              "щоб не палити токени")
                     break
-                continue
-            truncated_in_row = 0
-            issues.extend(found)
-            done.update(code for code, _, _ in batch)
+            else:
+                truncated_in_row = 0
         except Exception as e:  # мережа, ліміти, модель недоступна
             log.error("AI-перевірка порції %d–%d не вдалась: %s", i, i + len(batch), e)
     log.info("AI перевірив %d назв, знайшов %d проблем, витрачено ≈$%.4f цього запуску",

@@ -20,14 +20,14 @@ def test_ai_response_parsed_and_invented_codes_dropped():
              "5 | Camambert → Camembert | друкарська помилка\n"
              "999 | щось → інше | вигадано\n"
              "5 | сир → сир | нічого не змінює")
-    issues, *_ = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г"), (2680, "Сир Camambert GRIL", "Г")])
+    issues = ai_check.check_batch(FakeClient(reply), "m", [(5, "Сир Camambert", "Г"), (2680, "Сир Camambert GRIL", "Г")]).issues
     assert sorted((i.code, i.suggestion) for i in issues) == [
         (5, "Camambert → Camembert"), (2680, "Camambert → Camembert")]
 
 
 def test_ai_none_and_prose_replies_give_no_issues():
     for reply in ("NONE", "все гаразд", "```json\n[]\n```"):
-        assert ai_check.check_batch(FakeClient(reply), "m", [(1, "Сир", "Г")])[0] == []
+        assert ai_check.check_batch(FakeClient(reply), "m", [(1, "Сир", "Г")]).issues == []
 
 
 def test_state_only_rechecks_new_or_changed_names(tmp_path):
@@ -80,18 +80,31 @@ def test_spend_is_tracked_per_month(tmp_path):
     assert st.ai_spent_this_month(date(2026, 11, 1)) == 0.0   # новий місяць — новий ліміт
 
 
-def test_truncated_response_is_not_marked_done_and_run_stops(monkeypatch):
+def test_truncated_with_no_output_counts_nothing_and_run_stops(monkeypatch):
     """Регресія: відповідь, обрізана по max_tokens, давала [] і назви вважались перевіреними,
     а гроші витрачались даремно."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
-    client = FakeClient("1 | Сир → Сир", in_tok=3000, out_tok=1200, stop_reason="max_tokens")
+    client = FakeClient("Зараз проаналізую кожну назву уважно", in_tok=3000, out_tok=1200, stop_reason="max_tokens")
     monkeypatch.setattr(ai_check, "_client", lambda: client)
     items = [(i, f"Сир Тест {i}", "Г") for i in range(ai_check.BATCH_SIZE * 5)]
     budget = ai_check.Budget(limit_usd=10)
     issues, done, out_of_budget = ai_check.check_names(items, budget)
     assert done == set() and issues == []
-    assert client.calls == 2                 # зупинились після двох обрізань поспіль
+    assert client.calls == 2                 # зупинились після двох порожніх обрізань поспіль
     assert budget.spent > 0                  # але витрати враховано
+
+
+def test_truncated_reply_keeps_completed_part():
+    reply = ("10 | Camambert → Camembert | друкарська помилка\n"
+             "12 | Пармеза → Пармезан | друкарська помилка\n"
+             "14 | Casteii")  # обірвано посеред рядка
+    items = [(c, f"Сир {c} Camambert Пармеза", "Г") for c in (10, 11, 12, 13, 14, 15)]
+    res = ai_check.check_batch(FakeClient(reply, stop_reason="max_tokens"), "m", items)
+    assert res.truncated
+    # обірваний рядок не розпізнається, тож консервативно: переглянуто лише те, що до останнього
+    # розпізнаного коду (12) не включно — його перевіримо наступного разу
+    assert res.covered == {10, 11}
+    assert [i.code for i in res.issues] == [10]
 
 
 def test_thinking_is_disabled(monkeypatch):
