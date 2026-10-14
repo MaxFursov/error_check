@@ -101,3 +101,23 @@ def test_thinking_is_disabled(monkeypatch):
     client.messages.create = lambda **kw: (seen.update(kw), orig(**kw))[1]
     ai_check.check_batch(client, "m", [(1, "Сир Тест", "Г")])
     assert seen["thinking"] == {"type": "disabled"}
+
+
+def test_junk_lines_from_model_are_filtered():
+    n = 'Сир "Gouda Fiko" нарізка 150 г (Фіко і друзі) POLMLEK'
+    junk = [("Сир Mozzarella свіжий 40% 150 г/шт Galbani", "Сир Mozzarella свіжий 40% 150 г/шт Galbani", "немає"),
+            ("Тетра пак ТFA", "NONE", ""), ("Європейська Сироварня", "без змін", ""),
+            ("MOZZARELLA", "Mozzarella", "регістр — пропускаю"), ("Камамбер", "Camembert (ок)", ""),
+            ("МИХОДІ", "МІХОДІ?", ""), ("Новотроя", "не в назві товару", ""), ("VIVA", "\"VIVA\" — коректна назва", ""),
+            ("Родина", "Родина — перевірте написання (можлива описка, але не впевнений)", "")]
+    for wrong, right, why in junk:
+        assert not ai_check.is_plausible(n, wrong, right, why), (wrong, right)
+
+
+def test_real_corrections_pass_filter():
+    good = [("Сир Camambert GRIL", "Camambert", "Camembert", "друкарська помилка"),
+            ("Ковбаса \"Родиннна\" вар.", "Родиннна", "Родинна", ""),
+            ("Сир ... 48% YOUNG", "YOUNG", "вік сиру, не ТМ", "вік замість виробника"),
+            ("Сир PRO MILR ванночка", "PRO MILR", "PRO MILK", "")]
+    for name, wrong, right, why in good:
+        assert ai_check.is_plausible(name, wrong, right, why), (wrong, right)

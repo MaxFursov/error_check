@@ -31,7 +31,10 @@ SYSTEM = f"""Ти — коректор каталогу товарів опто�
 - НЕ повідомляй про: відсутність ТМ/виробника, фасування чи жирності; регістр літер; різні варіанти
   транслітерації (Прошуто/Прошутто, Чорізо); сумніви щодо відповідності групі чи типу продукту;
   бренди, яких ти просто не знаєш; "потребує перевірки". Це не помилки.
-- Краще пропустити сумнівний випадок, ніж видати хибну тривогу. Не вигадуй проблем."""
+- Краще пропустити сумнівний випадок, ніж видати хибну тривогу. Не вигадуй проблем.
+- Якщо не впевнений або виправлення немає — НЕ пиши рядок взагалі. Ніколи не пиши в рядках "NONE",
+  "без змін", "пропускаю", "не впевнений", "ок" — такі рядки заборонені.
+- "слово_з_помилкою" — лише одне слово або коротка фраза (до 4 слів), ніколи не вся назва."""
 
 
 def _client():
@@ -40,6 +43,29 @@ def _client():
 
 
 LINE_RE = re.compile(r"^\s*(\d+)\s*\|\s*(.+?)\s*(?:→|->)\s*(.+?)\s*(?:\|\s*(.*?))?\s*$")
+
+
+# Маркери "бурмотіння" моделі: так вона пише, коли насправді виправлення немає
+JUNK_MARKERS = ("none", "без змін", "пропуск", "не впевнен", "немає", "(ок", " ок)", "ок)",
+                "не коригув", "незначн", "сумнів", "можлива описка", "перевірте", "ймовірна помилка", "не в назві", "невідом",
+                "коректн", "назва товару", "?")
+
+
+def is_plausible(name: str, wrong: str, right: str, why: str = "") -> bool:
+    """Відсікає рядки без реального виправлення: «→ NONE», «без змін», виправлення,
+    що лише міняє регістр, або «слово», що охоплює майже всю назву."""
+    w, r = wrong.casefold().strip(), right.casefold().strip()
+    if not w or not r or w == r:
+        return False
+    if any(m in r for m in JUNK_MARKERS) or any(m in why.casefold() for m in ("пропуск", "не впевнен", "не коригув")):
+        return False
+    if len(wrong) > 0.7 * len(name.strip()) and len(name.split()) > 2:
+        return False                      # "помилка" — уся назва
+    if len(wrong.split()) > 5:
+        return False
+    if len(right) > 2 * len(wrong) + 15 and "вік" not in why.casefold():
+        return False                      # розлогий текст замість виправлення
+    return True
 
 
 def _parse(text: str) -> list[tuple[int, str, str, str]]:
@@ -96,8 +122,8 @@ def check_batch(client, model: str, items: list[tuple[int, str, str]]):
     out = []
     text = "".join(b.text for b in resp.content if b.type == "text")
     for code, wrong, right, why in _parse(text):
-        if code not in names or wrong == right:
-            continue  # модель вигадала код або "виправила" на те саме
+        if code not in names or not is_plausible(names[code], wrong, right, why):
+            continue  # модель вигадала код або видала рядок без реального виправлення
         out.append(Issue(code, names[code], "ai_review", ERROR,
                          f"«{wrong}»: {why or 'ймовірна помилка'}", f"{wrong} → {right}"))
     usage = getattr(resp, "usage", None)
