@@ -1,0 +1,8 @@
+anthropic>=0.40.0
+requests>=2.31.0
+pandas>=2.2.0
+openpyxl>=3.1.2
+apscheduler==3.10.4
+python-dotenv==1.0.1
+pytz
+tzdata
