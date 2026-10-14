@@ -73,41 +73,80 @@ def collect_issues(df: pd.DataFrame, state: State) -> tuple[list[Issue], str]:
     return issues, footer
 
 
-def format_report(issues: list[Issue], new_keys: set[str], total: int, footer: str = "") -> str:
+LINE = "━━━━━━━━━━━━━━━━━━━━"
+TG_LIMIT = 3900  # одне повідомлення Telegram — до 4096 символів
+
+
+def _example(i: Issue) -> str:
+    detail = i.suggestion if i.suggestion else i.message
+    return (f"• <code>{i.code}</code> {html.escape(i.name.strip()[:45])}\n"
+            f"   ↳ <i>{html.escape(detail[:90])}</i>")
+
+
+def format_report(issues: list[Issue], new_keys: set[str], total: int, footer: str = "",
+                  when: datetime | None = None) -> str:
+    """Один компактний звіт з чіткими межами. Кількість прикладів на категорію
+    зменшується, доки все не влізе в одне повідомлення; повний список — у файлах."""
+    when = when or datetime.now()
     new = [i for i in issues if i.key in new_keys]
     counts = Counter(i.severity for i in new)
-    lines = [
-        f"<b>🔍 Перевірка каталогу Prom</b> · {datetime.now():%d.%m.%Y %H:%M}",
-        f"Позицій: {total} · нових проблем: <b>{len(new)}</b> "
-        f"(🔴 {counts[ERROR]} · 🟠 {counts[WARNING]} · ℹ️ {counts[INFO]})",
-        f"Усього відкритих проблем: {len(issues)}",
-    ]
     by_rule: dict[str, list[Issue]] = defaultdict(list)
     for i in new:
         by_rule[i.rule].append(i)
-    ordered = sorted(by_rule.items(), key=lambda kv: (min(SEV_ORDER[i.severity] for i in kv[1]), -len(kv[1])))
-    for rule, items in ordered:
-        sev = min(items, key=lambda i: SEV_ORDER[i.severity]).severity
-        lines.append(f"\n<b>{SEV_ICON[sev]} {html.escape(RULE_TITLES.get(rule, rule))}</b> — {len(items)}")
-        if sev == INFO:
-            continue  # дрібниці — тільки лічильник і файл
-        for i in items[:PER_RULE_LIMIT]:
-            tail = f" → <i>{html.escape(i.suggestion)}</i>" if i.suggestion else ""
-            lines.append(f"• <code>{i.code}</code> {html.escape(i.name.strip()[:80])}\n   {html.escape(i.message)}{tail}")
-        if len(items) > PER_RULE_LIMIT:
-            lines.append(f"…і ще {len(items) - PER_RULE_LIMIT} (див. файл)")
-    if footer:
-        lines.append("\n" + html.escape(footer))
-    return "\n".join(lines)
+    ordered = sorted(by_rule.items(),
+                     key=lambda kv: (min(SEV_ORDER[i.severity] for i in kv[1]), -len(kv[1])))
+
+    def build(per_rule: int) -> str:
+        lines = [
+            LINE,
+            f"🔍 <b>ЗВІТ ПРО ПОМИЛКИ В КАТАЛОЗІ</b>",
+            f"📅 {when:%d.%m.%Y, %H:%M}",
+            LINE,
+            f"Позицій у файлі: <b>{total}</b>",
+            f"Нових проблем: <b>{len(new)}</b>  (🔴 {counts[ERROR]} · 🟠 {counts[WARNING]} · ℹ️ {counts[INFO]})",
+            f"Усього відкритих: {len(issues)}",
+        ]
+        for rule, items in ordered:
+            sev = min(items, key=lambda i: SEV_ORDER[i.severity]).severity
+            lines.append(f"\n{SEV_ICON[sev]} <b>{html.escape(RULE_TITLES.get(rule, rule))}</b> — {len(items)}")
+            if sev == INFO or per_rule == 0:
+                continue  # дрібниці й зайві приклади — лише у файлі
+            lines.extend(_example(i) for i in items[:per_rule])
+            if len(items) > per_rule:
+                lines.append(f"   …і ще {len(items) - per_rule} — у файлі")
+        if footer:
+            lines.append("\n" + html.escape(footer))
+        lines.append("\n📎 <b>Повний список — у файлах нижче</b>")
+        lines.append(LINE)
+        lines.append("<b>КІНЕЦЬ ЗВІТУ</b>")
+        lines.append(LINE)
+        return "\n".join(lines)
+
+    for per_rule in (4, 3, 2, 1, 0):
+        text = build(per_rule)
+        if len(text) <= TG_LIMIT:
+            break
+    return text
 
 
-def to_csv(issues: list[Issue]) -> bytes:
+def to_csv(issues: list[Issue], new_keys: set[str] | None = None) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Код", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція"])
+    w.writerow(["Код", "Нова", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція"])
     for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.code)):
-        w.writerow([i.code, i.severity, RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion])
+        w.writerow([i.code, "так" if new_keys is None or i.key in new_keys else "ні", i.severity,
+                    RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion])
     return buf.getvalue().encode("utf-8-sig")  # BOM, щоб Excel бачив кирилицю
+
+
+def build_files(issues: list[Issue], new_keys: set[str], when: datetime | None = None):
+    """Файли-вкладення: нові помилки та повний список відкритих."""
+    day = (when or datetime.now()).strftime("%Y-%m-%d")
+    new = [i for i in issues if i.key in new_keys]
+    files = [(f"new_errors_{day}.csv", to_csv(new, new_keys), f"📎 Звіт від {day}: нові помилки ({len(new)})")]
+    if len(new) != len(issues):
+        files.append((f"all_open_{day}.csv", to_csv(issues, new_keys), f"Усі відкриті ({len(issues)})"))
+    return files
 
 
 def due(state: State, today: date | None = None) -> bool:
@@ -141,8 +180,7 @@ def run_check(source: str | None = None, dry_run: bool = False) -> list[Issue]:
         print(html.unescape(report))
         return issues
     if n_new or os.getenv("NOTIFY_WHEN_CLEAN", "false").lower() == "true":
-        sent = notifier.send_report(report, to_csv(issues),
-                                    f"errors_{datetime.now():%Y%m%d_%H%M}.csv")
+        sent = notifier.send_report(report, build_files(issues, new_keys))
         if not sent and notifier._configured():
             return issues  # не зберігаємо стан — повідомимо при наступному запуску
     prices = {int(r.code): float(r.price) for r in df[~df["archived"]].itertuples() if pd.notna(r.price)}
