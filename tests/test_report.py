@@ -60,3 +60,34 @@ def test_report_and_files_show_unique_id_not_internal_code():
 def test_falls_back_to_code_when_no_unique_id():
     i = Issue(542, "Ковбаса Київська", "short_name", ERROR, "x")      # uid немає (напр., архівний рядок)
     assert i.ident == 542 and "<code>542</code>" in checker.format_report([i], {i.key}, 1)
+
+
+def test_report_goes_to_every_chat_and_one_failure_does_not_block_others(monkeypatch):
+    import requests
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111, 222 ,333")
+    sent = []
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        if data["chat_id"] == "222":
+            raise requests.ConnectionError("blocked")
+        sent.append((url.rsplit("/", 1)[1], data["chat_id"]))
+
+        class R:
+            def raise_for_status(self): pass
+        return R()
+
+    monkeypatch.setattr(notifier.requests, "post", fake_post)
+    ok = notifier.send_report("текст", [("a.csv", b"x", "підпис"), ("b.csv", b"y", "")])
+    assert ok
+    assert sent == [("sendMessage", "111"), ("sendMediaGroup", "111"),
+                    ("sendMessage", "333"), ("sendMediaGroup", "333")]
+
+
+def test_all_recipients_failing_returns_false(monkeypatch):
+    import requests
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setattr(notifier.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
+    assert notifier.send_report("текст") is False
