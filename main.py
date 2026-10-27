@@ -4,6 +4,7 @@
   python main.py --once          — одна перевірка зараз
   python main.py --dry-run       — перевірка без Telegram і без збереження стану
   python main.py --dry-run --file prom_export.xlsx   — з локального файлу
+  python main.py --descriptions  — згенерувати чернетки описів і надіслати xlsx (--dry-run: лише показати)
 """
 import argparse
 import logging
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from checker import due, run_check  # noqa: E402  (після load_dotenv)
+from descriptions import run_descriptions  # noqa: E402
 from state import State  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -35,13 +37,25 @@ def scheduled_check():
         log.exception("Збій перевірки")
 
 
+def scheduled_descriptions():
+    try:
+        run_descriptions()
+    except Exception:
+        log.exception("Збій генерації описів")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--once", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--file")
+    p.add_argument("--descriptions", action="store_true")
+    p.add_argument("--limit", type=int, help="скільки описів згенерувати (для --descriptions)")
     args = p.parse_args()
 
+    if args.descriptions:
+        run_descriptions(args.file, dry_run=args.dry_run, limit=args.limit)
+        return
     if args.once or args.dry_run or args.file:
         run_check(args.file, dry_run=args.dry_run)
         return
@@ -51,6 +65,11 @@ def main():
     sched = BlockingScheduler(timezone="Europe/Kyiv")
     sched.add_job(scheduled_check, "cron", hour=hours, minute=minute, id="check",
                   misfire_grace_time=3600, coalesce=True)
+    if os.getenv("DESC_ENABLED", "false").lower() == "true":
+        sched.add_job(scheduled_descriptions, "cron", hour=os.getenv("DESC_SCHEDULE_HOURS", "9"), minute=minute,
+                      id="descriptions", misfire_grace_time=3600, coalesce=True)
+        log.info("Чернетки описів: щодня о %s:%02d, по %s шт.", os.getenv("DESC_SCHEDULE_HOURS", "9"), minute,
+                 os.getenv("DESC_PER_RUN", "30"))
     log.info("Планувальник запущено: о %s:%02d (Europe/Kyiv), перевірка раз на %s дн.", hours, minute,
              os.getenv("CHECK_EVERY_DAYS", "2"))
     if os.getenv("RUN_ON_START", "true").lower() == "true":

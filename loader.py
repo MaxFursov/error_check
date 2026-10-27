@@ -19,6 +19,8 @@ COLUMNS = {
     "Наявність": "available",
     "Кількість": "qty",
     "Назва_групи": "group",
+    "Опис_h2_uk": "desc",                # справжній опис (HTML); колонка «Опис» лише дублює назву
+    "Вага": "weight",                    # грами
 }
 REQUIRED = ("code", "name", "price", "unit", "group")
 
@@ -54,7 +56,7 @@ def _fix_zip_case(data: bytes) -> bytes:
 
 def read_catalog(data: bytes) -> pd.DataFrame:
     """Повертає DataFrame з колонками uid (ID товару), code, name, price, unit, image,
-    available, qty, group + archived (bool)."""
+    available, qty, group, desc (Опис_h2_uk), weight + archived (bool)."""
     raw = pd.read_excel(io.BytesIO(_fix_zip_case(data)), engine="openpyxl")
     missing = [c for c in COLUMNS if c in ("Код_товару", "Назва_позиції", "Ціна",
                                            "Одиниця_виміру", "Назва_групи")
@@ -72,6 +74,8 @@ def read_catalog(data: bytes) -> pd.DataFrame:
     df["name"] = df["name"].fillna("").astype(str)
     df["group"] = df["group"].fillna("").astype(str)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["desc"] = df["desc"].fillna("").astype(str)
+    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
     df["archived"] = (df["group"].str.strip().str.startswith("Я!")
                       | df["name"].str.contains(WITHDRAWN_NAME_RE, case=False, regex=True))
     return df.reset_index(drop=True)

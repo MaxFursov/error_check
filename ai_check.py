@@ -85,8 +85,9 @@ class Budget:
     як для Sonnet), щоб ліміт спрацьовував із запасом; змінюються через
     AI_PRICE_IN_PER_MTOK / AI_PRICE_OUT_PER_MTOK."""
 
-    def __init__(self, limit_usd: float, spent_usd: float = 0.0):
+    def __init__(self, limit_usd: float, spent_usd: float = 0.0, max_out: int | None = None):
         self.limit = limit_usd
+        self.max_out = max_out or MAX_OUTPUT_TOKENS
         self.start = spent_usd
         self.spent = spent_usd
         self.price_in = float(os.getenv("AI_PRICE_IN_PER_MTOK", "3.0"))
@@ -101,7 +102,7 @@ class Budget:
 
     def worst_case(self, prompt_chars: int) -> float:
         # кирилиця токенізується погано: рахуємо 1 токен на 2 символи, вихід — по максимуму
-        return self.cost(prompt_chars // 2 + 100, MAX_OUTPUT_TOKENS)
+        return self.cost(prompt_chars // 2 + 100, self.max_out)
 
     def can_afford(self, prompt_chars: int) -> bool:
         return self.spent + self.worst_case(prompt_chars) <= self.limit

@@ -2,6 +2,7 @@
 import html
 import json
 import logging
+import mimetypes
 import os
 import re
 
@@ -37,6 +38,10 @@ def _chats() -> list[str]:
     return [c for c in re.split(r"[,\s]+", os.getenv("TELEGRAM_CHAT_ID", "")) if c]
 
 
+def _mime(name: str) -> str:
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
 def _send_to(chat: str, text_html: str, files) -> None:
     for part in split_message(text_html):   # зазвичай одна частина
         r = requests.post(_api("sendMessage"), timeout=30, data={
@@ -47,14 +52,14 @@ def _send_to(chat: str, text_html: str, files) -> None:
         name, data, caption = files[0]
         r = requests.post(_api("sendDocument"), timeout=60,
                           data={"chat_id": chat, "caption": caption},
-                          files={"document": (name, data, "text/csv")})
+                          files={"document": (name, data, _mime(name))})
         r.raise_for_status()
     elif files:
         media = [{"type": "document", "media": f"attach://f{n}",
                   **({"caption": files[0][2]} if n == 0 else {})} for n in range(len(files))]
         r = requests.post(_api("sendMediaGroup"), timeout=90,
                           data={"chat_id": chat, "media": json.dumps(media)},
-                          files={f"f{n}": (name, data, "text/csv")
+                          files={f"f{n}": (name, data, _mime(name))
                                  for n, (name, data, _) in enumerate(files)})
         r.raise_for_status()
 
