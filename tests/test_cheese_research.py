@@ -188,7 +188,7 @@ def stored(tmp_path, items):
     store = DescStore(str(tmp_path / "d.json"))
     for code, name, status, last, sent in items:
         store.add(code, 1000 + code, name, "Г", "+", f"Текст {code}", status=status, missing=[], sources=[], notes="")
-        store.data["items"][str(code)].update({"sent": sent, "last_sent": last, "first_sent": last})
+        store.data["items"][str(code)].update({"sent": sent, "last_sent": last, "first_sent": last, "times_sent": 1 if sent else 0})
     return store
 
 
