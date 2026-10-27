@@ -7,6 +7,7 @@
   python main.py --descriptions  — згенерувати чернетки описів і надіслати xlsx (--dry-run: лише показати)
   python main.py --descriptions-prepare out.txt   — записати запит для сесії Claude (режим без API-ключа)
   python main.py --descriptions-ingest reply.txt  — прийняти відповідь сесії, перевірити, зберегти, зібрати xlsx
+  python main.py --descriptions-ingest-research r.json — те саме для сирів з даними з інтернету (JSON {код: {...}})
 """
 import argparse
 import logging
@@ -59,6 +60,7 @@ def main():
     p.add_argument("--descriptions", action="store_true")
     p.add_argument("--descriptions-prepare", metavar="OUT")
     p.add_argument("--descriptions-ingest", metavar="REPLY")
+    p.add_argument("--descriptions-ingest-research", metavar="JSON")
     p.add_argument("--codes", help="для --descriptions-prepare: коди товарів через кому")
     p.add_argument("--limit", type=int, help="скільки описів згенерувати (для --descriptions)")
     args = p.parse_args()
@@ -69,6 +71,9 @@ def main():
         return
     if args.descriptions_ingest:
         descriptions.ingest(args.descriptions_ingest, args.file, dry_run=args.dry_run)
+        return
+    if args.descriptions_ingest_research:
+        descriptions.ingest_research(args.descriptions_ingest_research, args.file, dry_run=args.dry_run)
         return
     if args.descriptions:
         run_descriptions(args.file, dry_run=args.dry_run, limit=args.limit)
