@@ -1,4 +1,5 @@
 import io
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -64,7 +65,7 @@ def test_pick_targets_skips_archive_filled_stored_and_puts_stock_first(tmp_path,
     df = make_df([(1, "Сир А", "Г", "", "-"), (2, "Сир Б", "Г", "", "+"), (3, "Сир В", "Г", "<p>є</p>", "+"),
                   (4, "Сир Г", "Я!Г", "", "+"), (5, "Сир Д", "Г", "", "+")])
     store = DescStore(str(tmp_path / "d.json"))
-    store.add(5, 1005, "Сир Д", "Г", "+", "<p>x</p>")
+    store.add(5, 1005, "Сир Д", "Г", "+", "Текст")
     got, left = descriptions.pick_targets(df, store, 10)
     assert list(got["code"]) == [2] and left == 1                       # лише в наявності
     monkeypatch.setenv("DESC_ONLY_IN_STOCK", "false")
@@ -74,7 +75,7 @@ def test_pick_targets_skips_archive_filled_stored_and_puts_stock_first(tmp_path,
 
 def test_store_renamed_product_is_regenerated_and_failures_capped(tmp_path):
     store = DescStore(str(tmp_path / "d.json"))
-    store.add(1, 1001, "Сир А", "Г", "+", "<p>x</p>")
+    store.add(1, 1001, "Сир А", "Г", "+", "Текст")
     store.save()
     store = DescStore(str(tmp_path / "d.json"))
     assert store.has_fresh(1, "Сир А") and not store.has_fresh(1, "Сир А (нова назва)")
@@ -97,7 +98,7 @@ def test_generate_keeps_good_rejects_bad_and_ignores_invented_codes(monkeypatch,
     budget = ai_check.Budget(5.0, max_out=descriptions.MAX_OUTPUT_TOKENS)
     made, rejected, out_of_budget = descriptions.generate(targets, descriptions.style_examples(df), budget, store)
     assert list(made) == [1] and rejected == 1 and not out_of_budget
-    assert made[1].startswith("<p><strong>КОВБАСА «ДОМАШНЯ» СИРОКОПЧЕНА</strong></p>")
+    assert made[1].startswith("КОВБАСА «ДОМАШНЯ» СИРОКОПЧЕНА\n\nСирокопчена ковбаса") and "<" not in made[1]
     assert store.has_fresh(1, df.name[0]) and store.attempts(2, "Сир Х") == 1
     assert "КОВБАСА «ПРИКЛАД»" in client.prompts[0]                      # зразок стилю потрапив у запит
     assert "Склад: м'ясо" not in client.prompts[0]                        # а склад із зразка — ні
@@ -121,7 +122,7 @@ def test_no_api_key_means_nothing_generated(monkeypatch):
 
 def test_xlsx_has_label_template_column():
     data = descriptions.to_xlsx([{"uid": 7, "code": 1, "name": "Сир А ", "group": "Г", "available": "+",
-                                  "html": "<p>x</p>"}])
+                                  "text": "Текст"}])
     back = pd.read_excel(io.BytesIO(data))
     assert list(back.columns) == descriptions.COLS
     assert back.iloc[0]["ID"] == 7 and "Склад:" in back.iloc[0][descriptions.COLS[-1]]
@@ -158,3 +159,12 @@ def test_due_every_n_days(tmp_path, monkeypatch):
     store.data["last_run"] = "2026-10-27"
     assert not descriptions.due(store, date(2026, 10, 29))
     assert descriptions.due(store, date(2026, 10, 30))
+
+
+def test_old_html_drafts_are_converted_to_plain_text_on_load(tmp_path):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"items": {"1": {"uid": 1, "name": "Сир", "group": "Г", "available": "+", "name_hash": "x",
+        "html": "<p><strong>СИР</strong></p>\n\n<p><strong>Поживна цінність:</strong><br />\nжири &mdash; 27,0 г.</p>",
+        "sent": False}}}, ensure_ascii=False), encoding="utf-8")
+    item = DescStore(str(path)).data["items"]["1"]
+    assert "html" not in item and item["text"] == "СИР\n\nПоживна цінність:\nжири — 27,0 г."

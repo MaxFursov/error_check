@@ -5,7 +5,6 @@ Claude шукає сторінку саме цього продукту (сай�
 вимагає джерела, які справді були у видачі пошуку, і складає HTML у тому ж вигляді, що й наявні описи
 (заголовок, Склад, Поживна цінність, Енергетична цінність, Умови зберігання). Чого не знайдено — того в описі
 немає, воно потрапляє в колонку «Не знайдено»."""
-import html
 import json
 import logging
 import os
@@ -82,7 +81,7 @@ class ResearchBudget(ai_check.Budget):
 @dataclass
 class Result:
     ok: bool
-    html: str = ""
+    text: str = ""
     status: str = ""
     missing: list = field(default_factory=list)
     sources: list = field(default_factory=list)
@@ -218,38 +217,36 @@ def build_result(data: dict, name: str, weight, allowed_urls: set | None) -> Res
     status = "лише заголовок" if not has_facts else ("повний" if not core_missing else "частковий")
     if problems:
         notes = (notes + " " if notes else "") + "Перевірка: " + "; ".join(problems) + "."
-    return Result(True, render_html(heading, summary if not has_facts else None, f), status, missing,
+    return Result(True, render_text(heading, summary if not has_facts else None, f), status, missing,
                   sources if has_facts else [], notes)
 
 
-# ---------- HTML як у наявних описах ----------
+# ---------- простий текст: 1С сама перетворює абзаци й переноси на HTML для Проми ----------
 
 def _fmt(x: float, digits: int = 1) -> str:
     return f"{x:.{digits}f}".replace(".", ",")
 
 
-def _h(text: str) -> str:
-    return html.escape(text, quote=False).replace("°", "&deg;").replace("—", "&mdash;").replace("–", "&ndash;")
-
-
-def render_html(heading: str, summary: str | None, f: dict) -> str:
-    blocks = [f"<p><strong>{_h(heading)}</strong></p>"]
+def render_text(heading: str, summary: str | None, f: dict) -> str:
+    """Структура як у наявних описах (заголовок, Склад, Поживна цінність, Енергетична цінність, Умови зберігання),
+    але без тегів: абзаци розділені порожнім рядком, рядки поживної цінності — переносами."""
+    blocks = [heading]
     if summary:
-        blocks.append(f"<p>{_h(summary)}</p>")
+        blocks.append(summary)
     if f.get("composition"):
-        blocks.append(f"<p><strong>Склад:</strong> {_h(f['composition'])}</p>")
+        blocks.append(f"Склад: {f['composition']}")
     if f.get("allergens"):
-        blocks.append(f"<p>{_h(f['allergens'])}</p>")
-    rows = [f"{label} &mdash; {_fmt(f[key])} г{sep}" for key, label, sep in NUTRITION if f.get(key) is not None]
+        blocks.append(f["allergens"])
+    rows = [f"{label} — {_fmt(f[key])} г{sep}" for key, label, sep in NUTRITION if f.get(key) is not None]
     if rows:
         rows[-1] = rows[-1][:-1] + "."
-        blocks.append("<p><strong>Поживна цінність на 100 г продукту:</strong><br />\n" + "<br />\n".join(rows) + "</p>")
+        blocks.append("Поживна цінність на 100 г продукту:\n" + "\n".join(rows))
     energy = " / ".join(x for x in (f"{_fmt(f['kj'], 0)} кДж" if f.get("kj") else "",
                                     f"{_fmt(f['kcal'], 0)} ккал" if f.get("kcal") else "") if x)
     if energy:
-        blocks.append(f"<p><strong>Енергетична цінність (калорійність):</strong><br />\n{energy}</p>")
+        blocks.append(f"Енергетична цінність (калорійність):\n{energy}")
     if f.get("storage"):
-        blocks.append(f"<p><strong>Умови зберігання:</strong><br />\n{_h(f['storage'])}</p>")
+        blocks.append(f"Умови зберігання:\n{f['storage']}")
     return "\n\n".join(blocks)
 
 

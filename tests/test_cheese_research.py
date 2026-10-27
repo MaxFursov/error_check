@@ -45,42 +45,44 @@ def text(d):
     return SimpleNamespace(type="text", text="Ось результат:\n```json\n" + json.dumps(d, ensure_ascii=False) + "\n```")
 
 
-def test_full_result_is_rendered_like_existing_descriptions():
+def test_full_result_is_rendered_as_plain_text_in_the_layout_of_existing_descriptions():
     res = cr.build_result(dict(GOOD), NAME, 150.0, {URL})
     assert res.ok and res.status == "повний" and res.sources == [URL]
-    h = res.html
-    assert h.startswith("<p><strong>СИР «GOUDA» НАРІЗКА СЛАЙСАМИ</strong></p>\n\n<p><strong>Склад:</strong> молоко")
-    assert ("<p><strong>Поживна цінність на 100 г продукту:</strong><br />\n"
-            "жири &mdash; 27,0 г,<br />\nз них насичені &mdash; 17,5 г;<br />\n"
-            "вуглеводи &mdash; 0,0 г,<br />\nз них цукри &mdash; 0,0 г;<br />\n"
-            "білки &mdash; 25,0 г;<br />\nсіль &mdash; 1,8 г.</p>") in h
-    assert "<p><strong>Енергетична цінність (калорійність):</strong><br />\n1451 кДж / 350 ккал</p>" in h
-    assert "від +2&deg;C до +6&deg;C" in h
-    assert "Сир «Gouda» у нарізці" not in h          # коротке summary додається лише коли фактів немає
+    assert "<" not in res.text and "&" not in res.text                  # жодних тегів і сутностей: HTML зробить 1С
+    assert res.text == (
+        "СИР «GOUDA» НАРІЗКА СЛАЙСАМИ\n\n"
+        "Склад: молоко пастеризоване, сіль, закваска, сичужний фермент\n\n"
+        "Містить молоко.\n\n"
+        "Поживна цінність на 100 г продукту:\n"
+        "жири — 27,0 г,\nз них насичені — 17,5 г;\n"
+        "вуглеводи — 0,0 г,\nз них цукри — 0,0 г;\n"
+        "білки — 25,0 г;\nсіль — 1,8 г.\n\n"
+        "Енергетична цінність (калорійність):\n1451 кДж / 350 ккал\n\n"
+        "Умови зберігання:\nЗберігати при температурі від +2°C до +6°C.")
 
 
 def test_nothing_found_gives_heading_summary_and_lists_missing():
     res = cr.build_result({"match": "none", "heading": "СИР «GOUDA» НАРІЗКА", "summary": "Сир «Gouda» у нарізці слайсами.",
                            "composition": "вигадано", "fat_g": 30, "sources": [URL]}, NAME, 150.0, {URL})
     assert res.ok and res.status == "лише заголовок" and res.sources == []
-    assert "Склад" not in res.html and "вигадано" not in res.html and "Сир «Gouda» у нарізці слайсами." in res.html
+    assert "Склад" not in res.text and "вигадано" not in res.text and "Сир «Gouda» у нарізці слайсами." in res.text
     assert res.missing[:2] == ["Склад", "Алергени"]
 
 
 def test_facts_without_real_sources_are_dropped():
     data = dict(GOOD, sources=["https://invented.example/page"])
     res = cr.build_result(data, NAME, 150.0, {URL})        # цієї адреси не було у видачі пошуку
-    assert res.status == "лише заголовок" and "Склад" not in res.html and "джерел" in res.notes
+    assert res.status == "лише заголовок" and "Склад" not in res.text and "джерел" in res.notes
     assert cr.build_result(dict(GOOD, sources=[]), NAME, 150.0, {URL}).status == "лише заголовок"
 
 
 def test_implausible_numbers_are_dropped():
     r = cr.build_result(dict(GOOD, kj=900), NAME, 150.0, {URL})          # 900 кДж ≠ 350 ккал
-    assert "ккал" not in r.html and "кДж" not in r.html and "не збігаються" in r.notes
+    assert "ккал" not in r.text and "кДж" not in r.text and "не збігаються" in r.notes
     r = cr.build_result(dict(GOOD, saturated_g=40), NAME, 150.0, {URL})  # насичені більше за жири
-    assert "насичені" not in r.html and "жири &mdash; 27,0" in r.html
+    assert "насичені" not in r.text and "жири — 27,0" in r.text
     r = cr.build_result(dict(GOOD, fat_g=60, protein_g=50), NAME, 150.0, {URL})   # сума > 100 г
-    assert "Поживна цінність" not in r.html
+    assert "Поживна цінність" not in r.text
 
 
 def test_bad_heading_is_rejected():
@@ -141,7 +143,7 @@ def test_pick_targets_defaults_to_cheese_only(monkeypatch, tmp_path):
 
 
 def test_xlsx_research_columns():
-    data = descriptions.to_xlsx([{"uid": 7, "code": 1, "name": NAME, "group": "Г", "available": "+", "html": "<p>x</p>",
+    data = descriptions.to_xlsx([{"uid": 7, "code": 1, "name": NAME, "group": "Г", "available": "+", "text": "Текст",
                                   "status": "частковий", "missing": ["Склад", "Умови зберігання"], "sources": [URL, URL + "2"],
                                   "notes": "ок"}])
     back = pd.read_excel(io.BytesIO(data))
@@ -153,7 +155,7 @@ def test_xlsx_research_columns():
 def test_user_maintained_databases_are_never_accepted_as_sources():
     data = dict(GOOD, sources=["https://www.fatsecret.pl/kalorie/ryki/maasdam/100g", "https://world.openfoodfacts.org/product/1"])
     res = cr.build_result(data, NAME, 150.0, None)
-    assert res.status == "лише заголовок" and res.sources == [] and "Склад" not in res.html
+    assert res.status == "лише заголовок" and res.sources == [] and "Склад" not in res.text
     ok = cr.build_result(dict(GOOD, sources=["https://www.fatsecret.pl/x", URL]), NAME, 150.0, None)
     assert ok.status == "повний" and ok.sources == [URL]
 

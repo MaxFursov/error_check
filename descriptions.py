@@ -30,11 +30,8 @@ MAX_OUTPUT_TOKENS = 2500
 DEFAULT_MODEL = "claude-sonnet-5-5"   # текст бачать клієнти — беремо сильнішу модель, ніж для перевірки назв
 MAX_ATTEMPTS = 2                      # скільки разів пробуємо товар, чия відповідь не пройшла перевірку
 
-LABEL_BLOCK = (
-    "<p><strong>Склад:</strong> </p>\n\n"
-    "<p><strong>Поживна цінність на 100 г продукту:</strong> </p>\n\n"
-    "<p><strong>Енергетична цінність (калорійність):</strong> </p>\n\n"
-    "<p><strong>Умови зберігання:</strong> </p>")
+LABEL_BLOCK = ("Склад: \n\nПоживна цінність на 100 г продукту:\n\n"
+               "Енергетична цінність (калорійність):\n\nУмови зберігання:")
 
 SYSTEM = f"""Ти — копірайтер каталогу гуртового постачальника харчових продуктів.
 Для кожного товару з нумерованого списку напиши ЗАГОЛОВОК і КОРОТКИЙ ОПИС для картки товару.
@@ -152,9 +149,16 @@ def reject_reason(name: str, weight, heading: str, text: str) -> str | None:
     return None
 
 
-def to_html(heading: str, text: str) -> str:
-    return (f"<p><strong>{html.escape(heading, quote=False)}</strong></p>\n\n"
-            f"<p>{html.escape(text, quote=False)}</p>")
+def to_text(heading: str, text: str) -> str:
+    """Простий текст: 1С сама перетворює абзаци на HTML для Проми."""
+    return f"{heading}\n\n{text}"
+
+
+def html_to_text(src: str) -> str:
+    """Для чернеток, збережених у старому форматі (HTML): <br> -> перенос, </p> -> порожній рядок."""
+    src = re.sub(r"<br\s*/?>\s*", "\n", src)
+    src = re.sub(r"\s*</p>\s*", "\n\n", src)
+    return html.unescape(TAG_RE.sub("", src)).strip()
 
 
 # ---------- сховище ----------
@@ -170,6 +174,9 @@ class DescStore:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):
                 pass
+        for it in self.data["items"].values():     # чернетки зі старого формату (HTML)
+            if "html" in it:
+                it["text"] = html_to_text(it.pop("html"))
 
     def spent_this_month(self, today: date | None = None) -> float:
         month = (today or date.today()).strftime("%Y-%m")
@@ -191,10 +198,10 @@ class DescStore:
         f = self.data["failed"].get(str(code))
         return f["n"] if f and f["name_hash"] == name_hash(name) else 0
 
-    def add(self, code: int, uid, name: str, group: str, available: str, html_text: str, **extra) -> None:
+    def add(self, code: int, uid, name: str, group: str, available: str, text: str, **extra) -> None:
         self.data["items"][str(code)] = {
             "uid": None if uid is None or pd.isna(uid) else int(uid), "name": name, "group": group,
-            "available": available, "name_hash": name_hash(name), "html": html_text,
+            "available": available, "name_hash": name_hash(name), "text": text,
             "generated": date.today().isoformat(), "sent": False, **extra}
         self.data["failed"].pop(str(code), None)
 
@@ -296,7 +303,7 @@ def generate_batch(client, model: str, items: list, examples) -> Batch:
 
 
 def generate(items: pd.DataFrame, pool, budget: ai_check.Budget, store: DescStore | None):
-    """Повертає ({код: html}, кількість відхилених, чи зупинились через бюджет)."""
+    """Повертає ({код: текст}, кількість відхилених, чи зупинились через бюджет)."""
     if items.empty:
         return {}, 0, False
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -324,7 +331,7 @@ def generate(items: pd.DataFrame, pool, budget: ai_check.Budget, store: DescStor
         budget.add(res.in_tok, res.out_tok)
         by_code = {int(r.code): r for r in batch}
         for code, (heading, body) in res.ok.items():
-            made[code] = to_html(heading, body)
+            made[code] = to_text(heading, body)
             if store:
                 r = by_code[code]
                 store.add(code, r.uid, r.name, r.group, r.available, made[code])
@@ -338,7 +345,7 @@ def generate(items: pd.DataFrame, pool, budget: ai_check.Budget, store: DescStor
 
 def research_many(items: pd.DataFrame, budget, store: DescStore | None):
     """Сири: пошук даних в інтернеті по одному товару (cheese_research). Повертає
-    ({код: {html, status, missing, sources, notes}}, кількість відхилених, чи зупинились через бюджет)."""
+    ({код: {text, status, missing, sources, notes}}, кількість відхилених, чи зупинились через бюджет)."""
     import cheese_research as cr
     if items.empty:
         return {}, 0, False
@@ -369,16 +376,16 @@ def research_many(items: pd.DataFrame, budget, store: DescStore | None):
                 store.fail(code, r.name)
             continue
         extra = {"status": res.status, "missing": res.missing, "sources": res.sources, "notes": res.notes}
-        made[code] = {"html": res.html, **extra}
+        made[code] = {"text": res.text, **extra}
         log.info("Описи: код %s — %s, джерел %d", code, res.status, len(res.sources))
         if store:
-            store.add(code, r.uid, r.name, r.group, r.available, res.html, **extra)
+            store.add(code, r.uid, r.name, r.group, r.available, res.text, **extra)
     return made, rejected, out_of_budget
 
 
 # ---------- файл і звіт ----------
 
-COLS = ["ID", "Код_товару", "Назва", "Група", "Наявність", "Опис_h2_uk (готово до вставки)",
+COLS = ["ID", "Код_товару", "Назва", "Група", "Наявність", "Опис (текст для вставки в 1С)",
         "Склад і харчова цінність (заповнити з етикетки)"]
 COLS_RESEARCH = COLS[:6] + ["Статус", "Не знайдено — дописати вручну", "Джерела (перевірте перед публікацією)",
                             "Примітки"]
@@ -388,13 +395,13 @@ def to_xlsx(rows: list[dict]) -> bytes:
     research = any("status" in r for r in rows)
     if research:
         cols = COLS_RESEARCH
-        data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["html"],
+        data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["text"],
                  r.get("status", ""), ", ".join(r.get("missing", [])), "\n".join(r.get("sources", [])),
                  r.get("notes", "")] for r in rows]
         widths = (10, 12, 45, 24, 11, 70, 14, 28, 50, 45)
     else:
         cols = COLS
-        data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["html"], LABEL_BLOCK]
+        data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["text"], LABEL_BLOCK]
                 for r in rows]
         widths = (10, 12, 45, 24, 11, 70, 55)
     df = pd.DataFrame(data, columns=cols)
@@ -417,14 +424,14 @@ def format_message(n: int, left: int, footer: str, when: date | None = None, row
     when = when or date.today()
     research = bool(rows) and any("status" in r for r in rows)
     lines = [f"📝 <b>Чернетки описів{' сирів' if research else ''}</b> — {when:%d.%m.%Y}",
-             f"У файлі: <b>{n}</b> товарів без опису в «Опис_h2_uk».", ""]
+             f"У файлі: <b>{n}</b> товарів без опису.", ""]
     if research:
         counts = {k: sum(1 for r in rows if r.get("status") == k) for k in ("повний", "частковий", "лише заголовок")}
         lines += [f"Повних: {counts['повний']} · часткових: {counts['частковий']} · лише заголовок: {counts['лише заголовок']}",
                   "Дані взяті з інтернету. ⚠️ <b>Перед публікацією звіряйте з етикеткою</b>: у колонці «Джерела» — "
                   "сторінки, звідки взято склад і калорійність; що не знайдено — у колонці «Не знайдено»."]
     else:
-        lines += ["Колонка «Опис_h2_uk» містить лише заголовок і короткий текст за назвою — її можна вставляти в Пром.",
+        lines += ["Колонка «Опис» містить лише заголовок і короткий текст за назвою — її можна вставляти в 1С.",
                   "⚠️ <b>Склад, калорійність і умови зберігання бот не вигадує</b> — їх треба взяти з етикетки "
                   "виробника (шаблон у крайній колонці)."]
     lines.append(f"Ще без опису: {left}")
@@ -462,7 +469,7 @@ def _deliver(df: pd.DataFrame, store: DescStore, made: dict, footer: str, dry_ru
         for code, h in made.items():
             r = current[code]
             rows.append({"uid": None if pd.isna(r.uid) else int(r.uid), "code": code, "name": r.name,
-                         "group": r.group, "available": r.available, **(h if isinstance(h, dict) else {"html": h})})
+                         "group": r.group, "available": r.available, **(h if isinstance(h, dict) else {"text": h})})
     if not rows:
         log.info("Нових описів немає")
         return 0
@@ -476,7 +483,7 @@ def _deliver(df: pd.DataFrame, store: DescStore, made: dict, footer: str, dry_ru
     (out / name).write_bytes(xlsx)
     if dry_run:
         for r in rows[:5]:
-            print(f"\n[{r['code']}] {r['name']}\n{r['html']}")
+            print(f"\n[{r['code']}] {r['name']}\n{r['text']}")
         print(f"\nУ файлі {len(rows)} описів → reports/{name}\n"
               + html.unescape(format_message(len(rows), left, footer, rows=rows)))
         return len(rows)
@@ -563,7 +570,7 @@ def ingest(reply_path: str, source: str | None = None, dry_run: bool = False) ->
     by_code = {int(r.code): r for r in rows}
     made = {}
     for code, (heading, body) in ok.items():
-        made[code] = to_html(heading, body)
+        made[code] = to_text(heading, body)
         if not dry_run:
             r = by_code[code]
             store.add(code, r.uid, r.name, r.group, r.available, made[code])
@@ -605,9 +612,9 @@ def ingest_research(path: str, source: str | None = None, dry_run: bool = False)
                 store.fail(code, r.name)
             continue
         extra = {"status": res.status, "missing": res.missing, "sources": res.sources, "notes": res.notes}
-        made[code] = {"html": res.html, **extra}
+        made[code] = {"text": res.text, **extra}
         if not dry_run:
-            store.add(code, r.uid, r.name, r.group, r.available, res.html, **extra)
+            store.add(code, r.uid, r.name, r.group, r.available, res.text, **extra)
     if not dry_run:
         store.data["last_run"] = date.today().isoformat()
         store.save()
