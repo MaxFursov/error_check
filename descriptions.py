@@ -142,6 +142,8 @@ def reject_reason(name: str, weight, heading: str, text: str) -> str | None:
     known = _numbers(name)
     if weight is not None and not pd.isna(weight):
         known |= _numbers(str(int(weight)))
+        if weight >= 1000:
+            known |= _numbers(f"{weight / 1000:.3f}")      # 4000 г → «4 кг», 1500 г → «1,5 кг»
     extra = _numbers(both) - known
     if extra:
         return f"числа поза назвою: {', '.join(sorted(extra))}"
@@ -257,27 +259,34 @@ def build_prompt(items, examples) -> str:
     return f"ПРИКЛАДИ «назва → заголовок»:\n{ex}\n\nТОВАРИ:\n{listing}"
 
 
+def parse_reply(text: str, rows: list, truncated: bool = False) -> tuple[dict, dict]:
+    """Рядки `код | ЗАГОЛОВОК | текст` -> ({код: (заголовок, текст)}, {код: причина відхилення}).
+    Вигадані й повторені коди ігноруються; кожну чернетку перевіряє reject_reason."""
+    parsed = [(int(m.group(1)), m.group(2), m.group(3))
+              for m in map(LINE_RE.match, text.splitlines()) if m]
+    if truncated and parsed:
+        parsed = parsed[:-1]              # останній рядок міг обірватись
+    by_code = {int(r.code): r for r in rows}
+    ok, rejected = {}, {}
+    for code, heading, body in parsed:
+        r = by_code.get(code)
+        if r is None or code in ok or code in rejected:
+            continue
+        why = reject_reason(r.name, r.weight, heading, body)
+        if why:
+            rejected[code] = why
+        else:
+            ok[code] = (heading, body)
+    return ok, rejected
+
+
 def generate_batch(client, model: str, items: list, examples) -> Batch:
     resp = client.messages.create(
         model=model, max_tokens=MAX_OUTPUT_TOKENS, system=SYSTEM,
         thinking={"type": "disabled"},
         messages=[{"role": "user", "content": build_prompt(items, examples)}])
     text = "".join(b.text for b in resp.content if b.type == "text")
-    parsed = [(int(m.group(1)), m.group(2), m.group(3))
-              for m in map(LINE_RE.match, text.splitlines()) if m]
-    if getattr(resp, "stop_reason", None) == "max_tokens" and parsed:
-        parsed = parsed[:-1]              # останній рядок міг обірватись
-    by_code = {int(r.code): r for r in items}
-    ok, rejected = {}, {}
-    for code, heading, body in parsed:
-        r = by_code.get(code)
-        if r is None or code in ok or code in rejected:
-            continue                      # вигаданий або повторений код
-        why = reject_reason(r.name, r.weight, heading, body)
-        if why:
-            rejected[code] = why
-        else:
-            ok[code] = (heading, body)
+    ok, rejected = parse_reply(text, items, getattr(resp, "stop_reason", None) == "max_tokens")
     usage = getattr(resp, "usage", None)
     return Batch(ok, rejected, getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0)
 
@@ -360,33 +369,23 @@ def format_message(n: int, left: int, footer: str, when: date | None = None) -> 
     return "\n".join(lines)
 
 
-def run_descriptions(source: str | None = None, dry_run: bool = False, limit: int | None = None) -> int:
-    """Генерує чернетки для нових товарів і надсилає їх у Telegram. dry_run: нічого не шле й не зберігає,
-    лише пише reports/descriptions_preview.xlsx. Повертає кількість товарів у файлі."""
-    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "50"))
-    store = DescStore(store_path())
+def _load(source: str | None, dry_run: bool) -> pd.DataFrame | None:
     try:
         if source and os.path.exists(source):
-            df = loader.read_catalog(open(source, "rb").read())
-        else:
-            df = loader.load_catalog(source or os.getenv("PROM_EXPORT_URL", "https://www.dilovakovbasa.ua/"
-                                                         "upload/category/small/prom_export.xlsx"))
+            return loader.read_catalog(open(source, "rb").read())
+        return loader.load_catalog(source or os.getenv("PROM_EXPORT_URL", "https://www.dilovakovbasa.ua/"
+                                                       "upload/category/small/prom_export.xlsx"))
     except Exception as e:
         log.exception("Не вдалось завантажити каталог")
         if not dry_run:
             notifier.send_alert(f"Описи: не вдалось завантажити prom_export.xlsx: {e}")
-        return 0
+        return None
 
-    limit_usd = float(os.getenv("DESC_MONTHLY_BUDGET_USD", "3.0"))
-    budget = ai_check.Budget(limit_usd, store.spent_this_month(), max_out=MAX_OUTPUT_TOKENS)
-    targets, _ = pick_targets(df, store, per_run)
-    made, rejected, out_of_budget = generate(targets, style_examples(df), budget, None if dry_run else store)
-    if not dry_run:
-        store.set_spent(budget.spent)
-        store.data["last_run"] = date.today().isoformat()
-        store.save()                       # оплачена робота не повинна пропасти
 
-    # у файл — нові + ті, що не дійшли минулого разу і досі актуальні
+def _deliver(df: pd.DataFrame, store: DescStore, made: dict, footer: str, dry_run: bool,
+             without_telegram: bool = False) -> int:
+    """Збирає xlsx (нові чернетки + ті, що не дійшли минулого разу й досі актуальні) і надсилає.
+    without_telegram: якщо Telegram не налаштовано, файл вважається переданим (його покаже сама сесія)."""
     current = {int(r.code): r for r in df[~df["archived"] & (df["desc"].str.strip() == "")].itertuples()}
     rows = []
     for code, it in ({} if dry_run else store.unsent()).items():
@@ -405,6 +404,42 @@ def run_descriptions(source: str | None = None, dry_run: bool = False, limit: in
         return 0
 
     _, left = pick_targets(df, store, 0)
+    xlsx = to_xlsx(rows)
+    day = date.today().isoformat()
+    out = Path("reports")
+    out.mkdir(exist_ok=True)
+    name = "descriptions_preview.xlsx" if dry_run else f"descriptions_{day}.xlsx"
+    (out / name).write_bytes(xlsx)
+    if dry_run:
+        for r in rows[:5]:
+            print(f"\n[{r['code']}] {r['name']}\n{r['html']}")
+        print(f"\nУ файлі {len(rows)} описів → reports/{name}\n"
+              + html.unescape(format_message(len(rows), left, footer)))
+        return len(rows)
+    sent = notifier.send_report(format_message(len(rows), left, footer),
+                                [(name, xlsx, f"📎 Чернетки описів ({len(rows)})")])
+    if sent or (without_telegram and not notifier._configured()):
+        store.mark_sent([r["code"] for r in rows])   # інакше лишаються «не надісланими» й підуть наступного разу
+        store.save()
+    return len(rows)
+
+
+def run_descriptions(source: str | None = None, dry_run: bool = False, limit: int | None = None) -> int:
+    """Генерує чернетки через API для нових товарів і надсилає їх у Telegram. dry_run: нічого не шле й не
+    зберігає, лише пише reports/descriptions_preview.xlsx. Повертає кількість товарів у файлі."""
+    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "50"))
+    store = DescStore(store_path())
+    df = _load(source, dry_run)
+    if df is None:
+        return 0
+    limit_usd = float(os.getenv("DESC_MONTHLY_BUDGET_USD", "3.0"))
+    budget = ai_check.Budget(limit_usd, store.spent_this_month(), max_out=MAX_OUTPUT_TOKENS)
+    targets, _ = pick_targets(df, store, per_run)
+    made, rejected, out_of_budget = generate(targets, style_examples(df), budget, None if dry_run else store)
+    if not dry_run:
+        store.set_spent(budget.spent)
+        store.data["last_run"] = date.today().isoformat()
+        store.save()                       # оплачена робота не повинна пропасти
     footer = ""
     if os.getenv("ANTHROPIC_API_KEY"):
         footer = (f"🤖 Claude: цього запуску ≈${budget.used_now:.3f}, за місяць ≈${budget.spent:.3f} "
@@ -413,20 +448,54 @@ def run_descriptions(source: str | None = None, dry_run: bool = False, limit: in
             footer += "\n⏳ Ліміт вичерпано — продовжу наступного місяця або після збільшення DESC_MONTHLY_BUDGET_USD"
         if rejected:
             footer += f"\n🚫 Відхилено перевіркою (вигадані факти): {rejected}"
-    xlsx = to_xlsx(rows)
-    day = date.today().isoformat()
-    if dry_run:
-        out = Path("reports")
-        out.mkdir(exist_ok=True)
-        (out / "descriptions_preview.xlsx").write_bytes(xlsx)
-        for r in rows[:5]:
-            print(f"\n[{r['code']}] {r['name']}\n{r['html']}")
-        print(f"\nУ файлі {len(rows)} описів → reports/descriptions_preview.xlsx\n"
-              + html.unescape(format_message(len(rows), left, footer)))
-        return len(rows)
-    sent = notifier.send_report(format_message(len(rows), left, footer),
-                                [(f"descriptions_{day}.xlsx", xlsx, f"📎 Чернетки описів ({len(rows)})")])
-    if sent:                               # інакше лишаються «не надісланими» й підуть наступного разу
-        store.mark_sent([r["code"] for r in rows])
-        store.save()
+    return _deliver(df, store, made, footer, dry_run)
+
+
+# ---------- режим без API: описи пише сама сесія Claude (Claude Code) ----------
+
+def prepare(source: str | None, out_path: str, limit: int | None = None, codes: list[int] | None = None) -> int:
+    """Записує в out_path запит (інструкції, зразки, список товарів) для сесії Claude. Повертає кількість товарів.
+    codes — вибрати конкретні товари замість чергової порції (для ручної перевірки)."""
+    df = _load(source, dry_run=True)
+    if df is None:
+        return 0
+    targets, left = pick_targets(df, DescStore(store_path()), limit if limit is not None
+                                 else int(os.getenv("DESC_PER_RUN", "50")))
+    if codes:
+        targets = df[~df["archived"] & (df["desc"].str.strip() == "") & df["code"].isin(codes)]
+    rows = list(targets.itertuples())
+    examples = pick_examples([r.group for r in rows], [r.name for r in rows], style_examples(df), limit=12)
+    Path(out_path).write_text(f"{SYSTEM}\n\n=====\n\n{build_prompt(rows, examples)}\n", encoding="utf-8")
+    log.info("Запит на %d товарів записано в %s (усього без опису: %d)", len(rows), out_path, left)
     return len(rows)
+
+
+def ingest(reply_path: str, source: str | None = None, dry_run: bool = False) -> int:
+    """Читає відповідь сесії (`код | ЗАГОЛОВОК | текст`), перевіряє тим самим кодом, зберігає й збирає xlsx.
+    Показує, що відхилено. Telegram не налаштовано — файл лишається в reports/ для сесії."""
+    store = DescStore(store_path())
+    df = _load(source, dry_run=True)
+    if df is None:
+        return 0
+    text = Path(reply_path).read_text(encoding="utf-8")
+    rows = list(df[~df["archived"] & (df["desc"].str.strip() == "")].itertuples())
+    ok, rejected = parse_reply(text, rows)
+    by_code = {int(r.code): r for r in rows}
+    made = {}
+    for code, (heading, body) in ok.items():
+        made[code] = to_html(heading, body)
+        if not dry_run:
+            r = by_code[code]
+            store.add(code, r.uid, r.name, r.group, r.available, made[code])
+    for code, why in rejected.items():
+        log.warning("Описи: код %s відхилено — %s", code, why)
+        if not dry_run:
+            store.fail(code, by_code[code].name)
+    if not dry_run:
+        store.data["last_run"] = date.today().isoformat()
+        store.save()
+    footer = "✍️ Описи написала сесія Claude (без API-ключа)"
+    if rejected:
+        footer += f"\n🚫 Відхилено перевіркою (вигадані факти): {len(rejected)}"
+    log.info("Прийнято %d, відхилено %d", len(ok), len(rejected))
+    return _deliver(df, store, made, footer, dry_run, without_telegram=True)

@@ -5,6 +5,8 @@
   python main.py --dry-run       — перевірка без Telegram і без збереження стану
   python main.py --dry-run --file prom_export.xlsx   — з локального файлу
   python main.py --descriptions  — згенерувати чернетки описів і надіслати xlsx (--dry-run: лише показати)
+  python main.py --descriptions-prepare out.txt   — записати запит для сесії Claude (режим без API-ключа)
+  python main.py --descriptions-ingest reply.txt  — прийняти відповідь сесії, перевірити, зберегти, зібрати xlsx
 """
 import argparse
 import logging
@@ -55,9 +57,19 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--file")
     p.add_argument("--descriptions", action="store_true")
+    p.add_argument("--descriptions-prepare", metavar="OUT")
+    p.add_argument("--descriptions-ingest", metavar="REPLY")
+    p.add_argument("--codes", help="для --descriptions-prepare: коди товарів через кому")
     p.add_argument("--limit", type=int, help="скільки описів згенерувати (для --descriptions)")
     args = p.parse_args()
 
+    if args.descriptions_prepare:
+        descriptions.prepare(args.file, args.descriptions_prepare, args.limit,
+                             [int(c) for c in args.codes.split(",")] if args.codes else None)
+        return
+    if args.descriptions_ingest:
+        descriptions.ingest(args.descriptions_ingest, args.file, dry_run=args.dry_run)
+        return
     if args.descriptions:
         run_descriptions(args.file, dry_run=args.dry_run, limit=args.limit)
         return

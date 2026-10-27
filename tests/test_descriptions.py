@@ -54,6 +54,12 @@ def test_weight_column_numbers_are_allowed():
     assert descriptions.reject_reason("Ковбаса Х", 400.0, "КОВБАСА", "Ковбаса вагою 400 г у вакуумній упаковці.") is None
 
 
+def test_weight_in_kg_is_allowed_but_other_numbers_are_not():
+    assert descriptions.reject_reason("Сир брус", 4000.0, "СИР", "Сир у бруску вагою 4 кг для нарізки.") is None
+    assert descriptions.reject_reason("Сир брус", 1500.0, "СИР", "Сир у бруску вагою 1,5 кг для нарізки.") is None
+    assert "числа" in descriptions.reject_reason("Сир брус", 4000.0, "СИР", "Сир у бруску вагою 5 кг для нарізки.")
+
+
 def test_pick_targets_skips_archive_filled_stored_and_puts_stock_first(tmp_path, monkeypatch):
     df = make_df([(1, "Сир А", "Г", "", "-"), (2, "Сир Б", "Г", "", "+"), (3, "Сир В", "Г", "<p>є</p>", "+"),
                   (4, "Сир Г", "Я!Г", "", "+"), (5, "Сир Д", "Г", "", "+")])

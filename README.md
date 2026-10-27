@@ -42,6 +42,16 @@
   надішлеться наступного разу; товар, якому вже внесли опис у Пром, випадає сам.
 - Окремий бюджет `DESC_MONTHLY_BUDGET_USD` (за замовчуванням $3), вимкнено, доки `DESC_ENABLED=true`.
 
+**Без API-ключа (з сесії Claude Code).** Описи може писати сама сесія Claude, а код лише готує запит і перевіряє відповідь:
+
+```bash
+python main.py --descriptions-prepare request.txt      # запит: інструкції, зразки, наступні товари (--codes 1,2,3 — конкретні)
+# сесія Claude читає request.txt і пише reply.txt: рядки «код | ЗАГОЛОВОК | текст»
+python main.py --descriptions-ingest reply.txt         # перевірка тим самим кодом, descriptions.json, reports/descriptions_<дата>.xlsx
+```
+
+Telegram за цього режиму необов'язковий: без нього xlsx лишається в `reports/`, і сесія віддає його користувачу сама.
+
 ```bash
 python main.py --descriptions --dry-run --limit 10   # покаже зразки й запише reports/descriptions_preview.xlsx
 python main.py --descriptions                        # згенерувати й надіслати у Telegram
