@@ -523,7 +523,8 @@ def run_descriptions(source: str | None = None, dry_run: bool = False, limit: in
 
 # ---------- режим без API: описи пише сама сесія Claude (Claude Code) ----------
 
-def prepare(source: str | None, out_path: str, limit: int | None = None, codes: list[int] | None = None) -> int:
+def prepare(source: str | None, out_path: str, limit: int | None = None, codes: list[int] | None = None,
+            research: bool = False) -> int:
     """Записує в out_path запит (інструкції, зразки, список товарів) для сесії Claude. Повертає кількість товарів.
     codes — вибрати конкретні товари замість чергової порції (для ручної перевірки)."""
     df = _load(source, dry_run=True)
@@ -534,6 +535,15 @@ def prepare(source: str | None, out_path: str, limit: int | None = None, codes: 
     if codes:
         targets = df[~df["archived"] & (df["desc"].str.strip() == "") & df["code"].isin(codes)]
     rows = list(targets.itertuples())
+    if research:                           # сири: сесія Claude сама шукає в інтернеті й пише JSON для --descriptions-ingest-research
+        import cheese_research as cr
+        listing = "\n".join(f"{r.code} | {r.name.strip()} | група: {r.group.strip()}"
+                            + (f" | вага: {int(r.weight)} г" if not pd.isna(r.weight) else "") for r in rows)
+        Path(out_path).write_text(
+            f"{cr.SYSTEM}\n\n=====\nВідповідь для кожного товару — окремий JSON-об'єкт у форматі вище; збери їх у один файл "
+            f"{{\"код\": {{...}}, ...}}.\n\nТОВАРИ:\n{listing}\n", encoding="utf-8")
+        log.info("Запит на пошук для %d товарів записано в %s (усього без опису: %d)", len(rows), out_path, left)
+        return len(rows)
     examples = pick_examples([r.group for r in rows], [r.name for r in rows], style_examples(df), limit=12)
     Path(out_path).write_text(f"{SYSTEM}\n\n=====\n\n{build_prompt(rows, examples)}\n", encoding="utf-8")
     log.info("Запит на %d товарів записано в %s (усього без опису: %d)", len(rows), out_path, left)

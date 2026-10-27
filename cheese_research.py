@@ -125,6 +125,11 @@ def _text(v, limit: int):
     return v if v and len(v) <= limit and v.casefold() not in ("null", "none", "n/a", "-", "—") else None
 
 
+# бази, які наповнюють користувачі, і агрегатори калорій: їхні цифри не є даними з етикетки
+BAD_SOURCE_RE = re.compile(r"fatsecret|myfitnesspal|openfoodfacts|health-diet|fitatu|calorizator|calorie|kalorie|"
+                           r"yazio|nutritionix|edamam|wikipedia|facebook|instagram|reddit|youtube", re.I)
+
+
 def _norm_url(u: str) -> str:
     return re.sub(r"^https?://(?:www\.)?", "", u.strip().lower()).rstrip("/")
 
@@ -151,7 +156,8 @@ def build_result(data: dict, name: str, weight, allowed_urls: set | None) -> Res
 
     # джерела: лише ті, що справді були у видачі пошуку
     raw = data.get("sources") if isinstance(data.get("sources"), list) else []
-    sources = [s.strip() for s in raw if isinstance(s, str) and re.match(r"https?://", s.strip())]
+    sources = [s.strip() for s in raw if isinstance(s, str) and re.match(r"https?://", s.strip())
+               and not BAD_SOURCE_RE.search(s)]
     if allowed_urls is not None:
         allowed = {_norm_url(u) for u in allowed_urls}
         sources = [s for s in sources if _norm_url(s) in allowed]

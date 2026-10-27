@@ -148,3 +148,22 @@ def test_xlsx_research_columns():
     assert list(back.columns) == descriptions.COLS_RESEARCH
     assert back.iloc[0]["Статус"] == "частковий" and back.iloc[0]["Не знайдено — дописати вручну"] == "Склад, Умови зберігання"
     assert URL in back.iloc[0]["Джерела (перевірте перед публікацією)"]
+
+
+def test_user_maintained_databases_are_never_accepted_as_sources():
+    data = dict(GOOD, sources=["https://www.fatsecret.pl/kalorie/ryki/maasdam/100g", "https://world.openfoodfacts.org/product/1"])
+    res = cr.build_result(data, NAME, 150.0, None)
+    assert res.status == "лише заголовок" and res.sources == [] and "Склад" not in res.html
+    ok = cr.build_result(dict(GOOD, sources=["https://www.fatsecret.pl/x", URL]), NAME, 150.0, None)
+    assert ok.status == "повний" and ok.sources == [URL]
+
+
+def test_prepare_research_lists_cheeses_with_instructions(tmp_path, monkeypatch):
+    monkeypatch.setenv("DESC_STATE_PATH", str(tmp_path / "d.json"))
+    df = pd.DataFrame([[1, 1001, NAME, "Азимут", "+", "", 150.0, False]],
+                      columns=["code", "uid", "name", "group", "available", "desc", "weight", "archived"])
+    monkeypatch.setattr(descriptions, "_load", lambda source, dry_run: df)
+    out = tmp_path / "req.txt"
+    assert descriptions.prepare(None, str(out), research=True) == 1
+    text = out.read_text(encoding="utf-8")
+    assert "НЕ ПІДХОДЯТЬ як джерела" in text and "1 | Сир \"GOUDA\"" in text and "вага: 150 г" in text
