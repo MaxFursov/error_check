@@ -169,3 +169,80 @@ def test_prepare_research_lists_cheeses_with_instructions(tmp_path, monkeypatch)
     assert descriptions.prepare(None, str(out), research=True) == 1
     text = out.read_text(encoding="utf-8")
     assert "НЕ ПІДХОДЯТЬ як джерела" in text and "1 | Сир \"GOUDA\"" in text and "вага: 150 г" in text
+
+
+# ---------- нагадування про чернетки, які так і не внесли в Пром ----------
+
+from datetime import date
+
+
+def reminder_df(rows):
+    """rows: (code, name, desc_in_prom, available)."""
+    df = pd.DataFrame([[c, 1000 + c, n, "Г", a, d, float("nan"), False] for c, n, d, a in rows],
+                      columns=["code", "uid", "name", "group", "available", "desc", "weight", "archived"])
+    return df
+
+
+def stored(tmp_path, items):
+    """items: (code, name, status, last_sent, sent)."""
+    store = DescStore(str(tmp_path / "d.json"))
+    for code, name, status, last, sent in items:
+        store.add(code, 1000 + code, name, "Г", "+", f"Текст {code}", status=status, missing=[], sources=[], notes="")
+        store.data["items"][str(code)].update({"sent": sent, "last_sent": last, "first_sent": last})
+    return store
+
+
+def test_reminders_skip_filled_in_prom_recent_and_unsent_and_order_by_status_then_age(tmp_path):
+    today = date(2026, 11, 20)
+    df = reminder_df([(1, "Сир 1", "", "+"), (2, "Сир 2", "<p>вже є</p>", "+"), (3, "Сир 3", "", "+"),
+                      (4, "Сир 4", "", "+"), (5, "Сир 5", "", "+"), (6, "Сир 6", "", "-"), (7, "Сир 7", "", "+")])
+    store = stored(tmp_path, [
+        (1, "Сир 1", "лише заголовок", "2026-10-01", True),   # старий, але «лише заголовок» — в кінець
+        (2, "Сир 2", "повний", "2026-10-01", True),           # опис уже в Промі — пропустити
+        (3, "Сир 3", "повний", "2026-11-15", True),           # надсилали 5 днів тому — рано
+        (4, "Сир 4", "повний", "2026-10-20", True),
+        (5, "Сир 5", "частковий", "2026-10-10", True),
+        (6, "Сир 6", "повний", "2026-10-01", True),           # немає в наявності
+        (7, "Сир 7", "повний", "2026-10-25", False),          # ще не надсилали — це «новий», не нагадування
+    ])
+    got = descriptions.pick_reminders(df, store, 10, today)
+    assert [r["code"] for r in got] == [4, 5, 1]
+    assert all(r["reminder"] for r in got)
+    assert [r["code"] for r in descriptions.pick_reminders(df, store, 2, today)] == [4, 5]
+    assert descriptions.pick_reminders(df, store, 0, today) == []
+
+
+def test_renamed_product_is_not_reminded(tmp_path):
+    df = reminder_df([(1, "Сир 1 (нова назва)", "", "+")])
+    store = stored(tmp_path, [(1, "Сир 1", "повний", "2026-10-01", True)])
+    assert descriptions.pick_reminders(df, store, 5, date(2026, 11, 20)) == []
+
+
+def test_empty_day_sends_reminders_and_updates_last_sent_only_after_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("DESC_STATE_PATH", str(tmp_path / "d.json"))
+    monkeypatch.setenv("DESC_PER_RUN", "2")
+    monkeypatch.setenv("DESC_ONLY_KINDS", "")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")               # Telegram налаштовано: збій відправки не вважається доставкою
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    df = reminder_df([(1, "Сир 1", "", "+"), (2, "Сир 2", "", "+"), (3, "Сир 3", "", "+")])
+    monkeypatch.setattr(descriptions, "_load", lambda source, dry_run: df)
+    store = stored(tmp_path, [(1, "Сир 1", "повний", "2026-01-01", True), (2, "Сир 2", "повний", "2026-01-02", True),
+                              (3, "Сир 3", "повний", "2026-01-03", True)])
+    store.save()
+    sent, ok = [], {"v": False}
+    monkeypatch.setattr(descriptions.notifier, "send_report", lambda text, files=None: sent.append((text, files)) or ok["v"])
+    research = tmp_path / "r.json"
+    research.write_text("{}", encoding="utf-8")                 # нових сирів немає — лише нагадування
+
+    assert descriptions.ingest_research(str(research)) == 2
+    xlsx = pd.read_excel(io.BytesIO(sent[0][1][0][1]))
+    assert list(xlsx["Код_товару"]) == [1, 2] and all("нагадування" in x for x in xlsx["Нагадування"])
+    assert "нагадувань 2" in sent[0][0]
+    assert DescStore(str(tmp_path / "d.json")).data["items"]["1"]["last_sent"] == "2026-01-01"   # не доставлено — не змінюємо
+
+    ok["v"] = True
+    descriptions.ingest_research(str(research))
+    after = DescStore(str(tmp_path / "d.json")).data["items"]
+    assert after["1"]["last_sent"] == after["2"]["last_sent"] == date.today().isoformat() and after["1"]["times_sent"] == 2
+    assert after["3"]["last_sent"] == "2026-01-03"
+    assert descriptions.ingest_research(str(research)) == 1     # 1 і 2 надіслано сьогодні — лишився тільки сир 3

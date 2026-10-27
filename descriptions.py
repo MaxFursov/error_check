@@ -212,8 +212,13 @@ class DescStore:
         return {int(c): it for c, it in self.data["items"].items() if not it["sent"]}
 
     def mark_sent(self, codes) -> None:
+        today = date.today().isoformat()
         for c in codes:
-            self.data["items"][str(c)]["sent"] = True
+            it = self.data["items"][str(c)]
+            it["sent"] = True
+            it["last_sent"] = today
+            it.setdefault("first_sent", today)
+            it["times_sent"] = it.get("times_sent", 0) + 1
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,7 +230,7 @@ class DescStore:
 def due(store: DescStore, today: date | None = None) -> bool:
     """Чи пора генерувати: минуло DESC_EVERY_DAYS днів з останнього успішного запуску."""
     passed = store.days_since_last_run(today or date.today())
-    return passed is None or passed >= int(os.getenv("DESC_EVERY_DAYS", "3"))
+    return passed is None or passed >= int(os.getenv("DESC_EVERY_DAYS", "1"))
 
 
 def store_path() -> str:
@@ -250,6 +255,36 @@ def pick_targets(df: pd.DataFrame, store: DescStore, limit: int) -> tuple[pd.Dat
     todo = todo.assign(_stock=(todo["available"].astype(str).str.strip() != "+")) \
                .sort_values(["_stock", "group", "code"])
     return todo.head(limit), len(todo)
+
+
+STATUS_RANK = {"повний": 0, "частковий": 1, "лише заголовок": 2}
+
+
+def pick_reminders(df: pd.DataFrame, store: DescStore, limit: int, today: date | None = None) -> list[dict]:
+    """Нагадування: чернетки, які вже видавали, а в Промі опис так і не з'явився. Без нового пошуку — текст зі сховища.
+    Не раніше ніж через DESC_REMIND_DAYS (14) днів після попередньої видачі; повні й часткові — перед «лише заголовок»,
+    далі найстаріші першими."""
+    if limit <= 0:
+        return []
+    today = today or date.today()
+    gap = int(os.getenv("DESC_REMIND_DAYS", "14"))
+    only_stock = os.getenv("DESC_ONLY_IN_STOCK", "true").lower() == "true"
+    empty = df[~df["archived"] & (df["desc"].str.strip() == "")]
+    current = {int(r.code): r for r in empty.itertuples()}
+    found = []
+    for key, it in store.data["items"].items():
+        code = int(key)
+        r = current.get(code)
+        if not it.get("sent") or r is None or not store.has_fresh(code, r.name):
+            continue
+        if only_stock and str(r.available).strip() != "+":
+            continue
+        last = date.fromisoformat(it.get("last_sent") or it.get("generated") or today.isoformat())
+        if (today - last).days < gap:
+            continue
+        found.append((STATUS_RANK.get(it.get("status", "частковий"), 1), last, code, it))
+    found.sort(key=lambda t: t[:3])
+    return [{**it, "code": code, "reminder": True} for _, _, code, it in found[:limit]]
 
 
 # ---------- виклик Claude ----------
@@ -388,7 +423,15 @@ def research_many(items: pd.DataFrame, budget, store: DescStore | None):
 COLS = ["ID", "Код_товару", "Назва", "Група", "Наявність", "Опис (текст для вставки в 1С)",
         "Склад і харчова цінність (заповнити з етикетки)"]
 COLS_RESEARCH = COLS[:6] + ["Статус", "Не знайдено — дописати вручну", "Джерела (перевірте перед публікацією)",
-                            "Примітки"]
+                            "Примітки", "Нагадування"]
+
+
+def _reminder_label(r: dict) -> str:
+    if not r.get("reminder"):
+        return ""
+    first = r.get("first_sent") or r.get("generated") or ""
+    first = f"{first[8:10]}.{first[5:7]}.{first[:4]}" if len(first) == 10 else first
+    return f"нагадування: у Промі опису ще немає (вперше видано {first})"
 
 
 def to_xlsx(rows: list[dict]) -> bytes:
@@ -397,8 +440,8 @@ def to_xlsx(rows: list[dict]) -> bytes:
         cols = COLS_RESEARCH
         data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["text"],
                  r.get("status", ""), ", ".join(r.get("missing", [])), "\n".join(r.get("sources", [])),
-                 r.get("notes", "")] for r in rows]
-        widths = (10, 12, 45, 24, 11, 70, 14, 28, 50, 45)
+                 r.get("notes", ""), _reminder_label(r)] for r in rows]
+        widths = (10, 12, 45, 24, 11, 70, 14, 28, 50, 45, 26)
     else:
         cols = COLS
         data = [[r["uid"], r["code"], r["name"].strip(), r["group"], r["available"], r["text"], LABEL_BLOCK]
@@ -427,6 +470,10 @@ def format_message(n: int, left: int, footer: str, when: date | None = None, row
              f"У файлі: <b>{n}</b> товарів без опису.", ""]
     if research:
         counts = {k: sum(1 for r in rows if r.get("status") == k) for k in ("повний", "частковий", "лише заголовок")}
+        reminders = sum(1 for r in rows if r.get("reminder"))
+        if reminders:
+            lines[1] = (f"У файлі: <b>{n}</b> сирів: нових {n - reminders}, нагадувань {reminders} "
+                        "(опису в Промі ще немає).")
         lines += [f"Повних: {counts['повний']} · часткових: {counts['частковий']} · лише заголовок: {counts['лише заголовок']}",
                   "Дані взяті з інтернету. ⚠️ <b>Перед публікацією звіряйте з етикеткою</b>: у колонці «Джерела» — "
                   "сторінки, звідки взято склад і калорійність; що не знайдено — у колонці «Не знайдено»."]
@@ -470,8 +517,10 @@ def _deliver(df: pd.DataFrame, store: DescStore, made: dict, footer: str, dry_ru
             r = current[code]
             rows.append({"uid": None if pd.isna(r.uid) else int(r.uid), "code": code, "name": r.name,
                          "group": r.group, "available": r.available, **(h if isinstance(h, dict) else {"text": h})})
+    # якщо нових менше за денну норму — решту добираємо нагадуваннями про те, що ще не внесено в Пром
+    rows += pick_reminders(df, store, int(os.getenv("DESC_PER_RUN", "30")) - len(rows))
     if not rows:
-        log.info("Нових описів немає")
+        log.info("Нових описів і нагадувань немає")
         return 0
 
     _, left = pick_targets(df, store, 0)
@@ -498,7 +547,7 @@ def _deliver(df: pd.DataFrame, store: DescStore, made: dict, footer: str, dry_ru
 def run_descriptions(source: str | None = None, dry_run: bool = False, limit: int | None = None) -> int:
     """Генерує чернетки через API для нових товарів і надсилає їх у Telegram. dry_run: нічого не шле й не
     зберігає, лише пише reports/descriptions_preview.xlsx. Повертає кількість товарів у файлі."""
-    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "50"))
+    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "30"))
     store = DescStore(store_path())
     df = _load(source, dry_run)
     if df is None:
@@ -538,7 +587,7 @@ def prepare(source: str | None, out_path: str, limit: int | None = None, codes: 
     if df is None:
         return 0
     targets, left = pick_targets(df, DescStore(store_path()), limit if limit is not None
-                                 else int(os.getenv("DESC_PER_RUN", "50")))
+                                 else int(os.getenv("DESC_PER_RUN", "30")))
     if codes:
         targets = df[~df["archived"] & (df["desc"].str.strip() == "") & df["code"].isin(codes)]
     rows = list(targets.itertuples())
