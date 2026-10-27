@@ -142,3 +142,13 @@ def test_run_sends_xlsx_and_marks_sent_only_after_delivery(monkeypatch, tmp_path
     assert descriptions.run_descriptions(str(src)) == 1                   # той самий файл надсилається знову
     assert not DescStore(str(tmp_path / "d.json")).unsent()
     assert descriptions.run_descriptions(str(src)) == 0                   # далі нових немає
+
+
+def test_due_every_n_days(tmp_path, monkeypatch):
+    from datetime import date
+    monkeypatch.delenv("DESC_EVERY_DAYS", raising=False)
+    store = DescStore(str(tmp_path / "d.json"))
+    assert descriptions.due(store, date(2026, 10, 27))                    # ще не запускали
+    store.data["last_run"] = "2026-10-27"
+    assert not descriptions.due(store, date(2026, 10, 29))
+    assert descriptions.due(store, date(2026, 10, 30))

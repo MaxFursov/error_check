@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from checker import due, run_check  # noqa: E402  (після load_dotenv)
+import descriptions  # noqa: E402
 from descriptions import run_descriptions  # noqa: E402
 from state import State  # noqa: E402
 
@@ -38,7 +39,11 @@ def scheduled_check():
 
 
 def scheduled_descriptions():
+    """Тригер спрацьовує щодня, але генерація йде раз на DESC_EVERY_DAYS днів (дата — у descriptions.json)."""
     try:
+        if not descriptions.due(descriptions.DescStore(descriptions.store_path())):
+            log.info("Описи: рано — з останньої генерації минуло менше %s дн.", os.getenv("DESC_EVERY_DAYS", "3"))
+            return
         run_descriptions()
     except Exception:
         log.exception("Збій генерації описів")
@@ -68,8 +73,8 @@ def main():
     if os.getenv("DESC_ENABLED", "false").lower() == "true":
         sched.add_job(scheduled_descriptions, "cron", hour=os.getenv("DESC_SCHEDULE_HOURS", "9"), minute=minute,
                       id="descriptions", misfire_grace_time=3600, coalesce=True)
-        log.info("Чернетки описів: щодня о %s:%02d, по %s шт.", os.getenv("DESC_SCHEDULE_HOURS", "9"), minute,
-                 os.getenv("DESC_PER_RUN", "30"))
+        log.info("Чернетки описів: о %s:%02d раз на %s дн., по %s шт.", os.getenv("DESC_SCHEDULE_HOURS", "9"), minute,
+                 os.getenv("DESC_EVERY_DAYS", "3"), os.getenv("DESC_PER_RUN", "50"))
     log.info("Планувальник запущено: о %s:%02d (Europe/Kyiv), перевірка раз на %s дн.", hours, minute,
              os.getenv("CHECK_EVERY_DAYS", "2"))
     if os.getenv("RUN_ON_START", "true").lower() == "true":

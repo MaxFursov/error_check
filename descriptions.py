@@ -177,6 +177,10 @@ class DescStore:
     def set_spent(self, usd: float, today: date | None = None) -> None:
         self.data["spend"] = {"month": (today or date.today()).strftime("%Y-%m"), "usd": round(usd, 6)}
 
+    def days_since_last_run(self, today: date) -> int | None:
+        last = self.data.get("last_run")
+        return (today - date.fromisoformat(last)).days if last else None
+
     def has_fresh(self, code: int, name: str) -> bool:
         it = self.data["items"].get(str(code))
         return bool(it) and it["name_hash"] == name_hash(name)
@@ -207,6 +211,12 @@ class DescStore:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.path)
+
+
+def due(store: DescStore, today: date | None = None) -> bool:
+    """Чи пора генерувати: минуло DESC_EVERY_DAYS днів з останнього успішного запуску."""
+    passed = store.days_since_last_run(today or date.today())
+    return passed is None or passed >= int(os.getenv("DESC_EVERY_DAYS", "3"))
 
 
 def store_path() -> str:
@@ -353,7 +363,7 @@ def format_message(n: int, left: int, footer: str, when: date | None = None) -> 
 def run_descriptions(source: str | None = None, dry_run: bool = False, limit: int | None = None) -> int:
     """Генерує чернетки для нових товарів і надсилає їх у Telegram. dry_run: нічого не шле й не зберігає,
     лише пише reports/descriptions_preview.xlsx. Повертає кількість товарів у файлі."""
-    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "30"))
+    per_run = limit if limit is not None else int(os.getenv("DESC_PER_RUN", "50"))
     store = DescStore(store_path())
     try:
         if source and os.path.exists(source):
@@ -373,6 +383,7 @@ def run_descriptions(source: str | None = None, dry_run: bool = False, limit: in
     made, rejected, out_of_budget = generate(targets, style_examples(df), budget, None if dry_run else store)
     if not dry_run:
         store.set_spent(budget.spent)
+        store.data["last_run"] = date.today().isoformat()
         store.save()                       # оплачена робота не повинна пропасти
 
     # у файл — нові + ті, що не дійшли минулого разу і досі актуальні
