@@ -62,13 +62,14 @@ def main():
     p.add_argument("--descriptions-ingest", metavar="REPLY")
     p.add_argument("--descriptions-ingest-research", metavar="JSON")
     p.add_argument("--research", action="store_true", help="для --descriptions-prepare: запит на пошук даних сирів")
+    p.add_argument("--window", action="store_true", help="для --descriptions-prepare: черга за датою, без збереженого стану")
     p.add_argument("--codes", help="для --descriptions-prepare: коди товарів через кому")
     p.add_argument("--limit", type=int, help="скільки описів згенерувати (для --descriptions)")
     args = p.parse_args()
 
     if args.descriptions_prepare:
         descriptions.prepare(args.file, args.descriptions_prepare, args.limit,
-                             [int(c) for c in args.codes.split(",")] if args.codes else None, research=args.research)
+                             [int(c) for c in args.codes.split(",")] if args.codes else None, research=args.research, window=args.window)
         return
     if args.descriptions_ingest:
         descriptions.ingest(args.descriptions_ingest, args.file, dry_run=args.dry_run)

@@ -272,6 +272,34 @@ def pick_targets(df: pd.DataFrame, store: DescStore, limit: int) -> tuple[pd.Dat
     return todo.head(limit), len(todo)
 
 
+def pick_window(df: pd.DataFrame, limit: int, today: date | None = None) -> tuple[pd.DataFrame, int]:
+    """Черга БЕЗ збереженого стану (для запусків, які не можуть записати файл стану).
+    Стабільний список усіх активних товарів потрібного виду (іноземні першими, далі за групами й кодом; наявність і
+    наявність опису на порядок не впливають). Кожного робочого дня береться наступне «вікно» з DESC_WINDOW (30) позицій,
+    відлік від DESC_START_DATE; по закінченні списку — знову з початку. З вікна лишаються товари з порожнім описом у Промі
+    (і в наявності, якщо DESC_ONLY_IN_STOCK). Повертає (товари, розмір усього списку)."""
+    import numpy as np
+    today = today or date.today()
+    pool = df[~df["archived"]]
+    kinds = [k.strip() for k in os.getenv("DESC_ONLY_KINDS", "Сир").split(",") if k.strip()]
+    if kinds:
+        pool = pool[pool["name"].str.match(r"^\s*(?:" + "|".join(map(re.escape, kinds)) + r")\b", case=False)]
+    foreign_first = os.getenv("DESC_FOREIGN_FIRST", "true").lower() == "true"
+    pool = pool.assign(_local=[(not is_foreign(r.name, r.group)) if foreign_first else False for r in pool.itertuples()])
+    pool = pool.sort_values(["_local", "group", "code"])
+    total = len(pool)
+    if total == 0:
+        return pool, 0
+    start = date.fromisoformat(os.getenv("DESC_START_DATE", "2026-10-30"))
+    step = int(np.busday_count(start, today)) if today > start else 0     # робочих днів від старту
+    width = min(int(os.getenv("DESC_WINDOW", "30")), total)
+    window = pool.iloc[[(step * width + i) % total for i in range(width)]]
+    window = window[window["desc"].str.strip() == ""]
+    if os.getenv("DESC_ONLY_IN_STOCK", "true").lower() == "true":
+        window = window[window["available"].astype(str).str.strip() == "+"]
+    return window.head(limit), total
+
+
 STATUS_RANK = {"повний": 0, "розповідь": 1, "частковий": 2, "лише заголовок": 3}
 
 
@@ -597,7 +625,7 @@ def run_descriptions(source: str | None = None, dry_run: bool = False, limit: in
 # ---------- режим без API: описи пише сама сесія Claude (Claude Code) ----------
 
 def prepare(source: str | None, out_path: str, limit: int | None = None, codes: list[int] | None = None,
-            research: bool = False) -> int:
+            research: bool = False, window: bool = False) -> int:
     """Записує в out_path запит (інструкції, зразки, список товарів) для сесії Claude. Повертає кількість товарів.
     codes — вибрати конкретні товари замість чергової порції (для ручної перевірки)."""
     df = _load(source, dry_run=True)
@@ -605,6 +633,8 @@ def prepare(source: str | None, out_path: str, limit: int | None = None, codes: 
         return 0
     targets, left = pick_targets(df, DescStore(store_path()), limit if limit is not None
                                  else int(os.getenv("DESC_PER_RUN", "30")))
+    if window:
+        targets, left = pick_window(df, limit if limit is not None else int(os.getenv("DESC_PER_RUN", "30")))
     if codes:
         targets = df[~df["archived"] & (df["desc"].str.strip() == "") & df["code"].isin(codes)]
     rows = list(targets.itertuples())

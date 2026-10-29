@@ -303,3 +303,52 @@ def test_foreign_cheeses_come_first_but_domestic_latin_brands_do_not(tmp_path, m
     monkeypatch.setenv("DESC_FOREIGN_FIRST", "false")
     got, _ = descriptions.pick_targets(df, DescStore(str(tmp_path / "d.json")), 10)
     assert list(got["code"]) == [3, 2, 4, 1, 5]                           # без пріоритету — просто за групами
+
+
+
+# ---------- черга за датою, без збереженого стану ----------
+
+def window_df(n=10):
+    rows = [[i, 1000 + i, f"Сир Gouda{i} Brand", "Азимут", "+", "", float("nan"), False] for i in range(1, n + 1)]
+    return pd.DataFrame(rows, columns=["code", "uid", "name", "group", "available", "desc", "weight", "archived"])
+
+
+def test_window_moves_each_weekday_wraps_around_and_needs_no_state(monkeypatch):
+    monkeypatch.delenv("DESC_ONLY_KINDS")
+    monkeypatch.setenv("DESC_START_DATE", "2026-10-30")           # п'ятниця
+    monkeypatch.setenv("DESC_WINDOW", "4")
+    df = window_df(10)
+    def codes(day):
+        got, total = descriptions.pick_window(df, 4, day)
+        assert total == 10
+        return list(got["code"])
+    assert codes(date(2026, 10, 30)) == [1, 2, 3, 4]               # день старту
+    assert codes(date(2026, 10, 29)) == [1, 2, 3, 4]               # до старту — те саме
+    assert codes(date(2026, 10, 31)) == codes(date(2026, 11, 1)) == codes(date(2026, 11, 2)) == [5, 6, 7, 8]   # вихідні — як понеділок
+    assert codes(date(2026, 11, 3)) == [9, 10, 1, 2]               # вівторок: вікно замикається по колу
+    assert codes(date(2026, 11, 4)) == [3, 4, 5, 6]
+
+
+def test_window_skips_filled_and_out_of_stock_but_keeps_positions_stable(monkeypatch):
+    monkeypatch.delenv("DESC_ONLY_KINDS")
+    monkeypatch.setenv("DESC_START_DATE", "2026-10-30")
+    monkeypatch.setenv("DESC_WINDOW", "4")
+    df = window_df(10)
+    df.loc[df.code == 2, "desc"] = "вже є в Промі"
+    df.loc[df.code == 3, "available"] = "-"
+    a, _ = descriptions.pick_window(df, 4, date(2026, 10, 30))
+    assert list(a["code"]) == [1, 4]
+    b, _ = descriptions.pick_window(df, 4, date(2026, 11, 2))
+    assert list(b["code"]) == [5, 6, 7, 8]                         # опис чи наявність не зсувають наступні вікна
+
+
+def test_window_puts_foreign_first(monkeypatch):
+    monkeypatch.delenv("DESC_ONLY_KINDS")
+    monkeypatch.setenv("DESC_START_DATE", "2026-10-30")
+    monkeypatch.setenv("DESC_WINDOW", "2")
+    df = pd.DataFrame([[1, 1001, "Сир Сметанковий", "Ферма", "+", "", float("nan"), False],
+                       [2, 1002, "Сир Gouda Arla", "Азимут", "+", "", float("nan"), False],
+                       [3, 1003, "Сир Edam Mlekovita", "Смаковіта", "+", "", float("nan"), False]],
+                      columns=["code", "uid", "name", "group", "available", "desc", "weight", "archived"])
+    got, _ = descriptions.pick_window(df, 5, date(2026, 10, 30))
+    assert list(got["code"]) == [2, 3]
