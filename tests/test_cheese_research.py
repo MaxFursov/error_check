@@ -12,8 +12,10 @@ from descriptions import DescStore
 NAME = 'Сир "GOUDA" нарізка (слайси) 150 г/шт 48% Arla'
 URL = "https://www.arla.com/products/gouda-slices/"
 
+ABOUT = ["Нідерландський сир типу Gouda з коров'ячого молока в нарізці слайсами.",
+         "Жирність у сухій речовині — 48%, фасування — 150 г; смак м'який, вершковий."]
 GOOD = {
-    "match": "exact", "heading": "СИР «GOUDA» НАРІЗКА СЛАЙСАМИ", "summary": "Сир «Gouda» у нарізці слайсами.",
+    "match": "exact", "heading": "СИР «GOUDA» НАРІЗКА СЛАЙСАМИ", "summary": "Сир «Gouda» у нарізці слайсами.", "about": ABOUT,
     "composition": "молоко пастеризоване, сіль, закваска, сичужний фермент", "allergens": "Містить молоко.",
     "fat_g": 27, "saturated_g": 17.5, "carbs_g": 0, "sugars_g": 0, "protein_g": "25,0", "salt_g": 1.8,
     "kj": 1451, "kcal": 350, "storage": "Зберігати при температурі від +2°C до +6°C.",
@@ -51,6 +53,8 @@ def test_full_result_is_rendered_as_plain_text_in_the_layout_of_existing_descrip
     assert "<" not in res.text and "&" not in res.text                  # жодних тегів і сутностей: HTML зробить 1С
     assert res.text == (
         "СИР «GOUDA» НАРІЗКА СЛАЙСАМИ\n\n"
+        "Нідерландський сир типу Gouda з коров'ячого молока в нарізці слайсами.\n\n"
+        "Жирність у сухій речовині — 48%, фасування — 150 г; смак м'який, вершковий.\n\n"
         "Склад: молоко пастеризоване, сіль, закваска, сичужний фермент\n\n"
         "Містить молоко.\n\n"
         "Поживна цінність на 100 г продукту:\n"
@@ -66,7 +70,7 @@ def test_nothing_found_gives_heading_summary_and_lists_missing():
                            "composition": "вигадано", "fat_g": 30, "sources": [URL]}, NAME, 150.0, {URL})
     assert res.ok and res.status == "лише заголовок" and res.sources == []
     assert "Склад" not in res.text and "вигадано" not in res.text and "Сир «Gouda» у нарізці слайсами." in res.text
-    assert res.missing[:2] == ["Склад", "Алергени"]
+    assert res.missing[:3] == ["Розповідь про сир", "Склад", "Алергени"]
 
 
 def test_facts_without_real_sources_are_dropped():
@@ -168,7 +172,7 @@ def test_prepare_research_lists_cheeses_with_instructions(tmp_path, monkeypatch)
     out = tmp_path / "req.txt"
     assert descriptions.prepare(None, str(out), research=True) == 1
     text = out.read_text(encoding="utf-8")
-    assert "НЕ ПІДХОДЯТЬ як джерела" in text and "1 | Сир \"GOUDA\"" in text and "вага: 150 г" in text
+    assert "НЕ ПІДХОДЯТЬ" in text and "РОЗПОВІДЬ ПРО СИР" in text and "1 | Сир \"GOUDA\"" in text and "вага: 150 г" in text
 
 
 # ---------- нагадування про чернетки, які так і не внесли в Пром ----------
@@ -246,3 +250,56 @@ def test_empty_day_sends_reminders_and_updates_last_sent_only_after_delivery(tmp
     assert after["1"]["last_sent"] == after["2"]["last_sent"] == date.today().isoformat() and after["1"]["times_sent"] == 2
     assert after["3"]["last_sent"] == "2026-01-03"
     assert descriptions.ingest_research(str(research)) == 1     # 1 і 2 надіслано сьогодні — лишився тільки сир 3
+
+
+
+# ---------- розповідь про сир ----------
+
+def test_about_only_gives_status_story_and_keeps_sources():
+    data = {"match": "type", "heading": "СИР «GOUDA» НАРІЗКА СЛАЙСАМИ", "about": ABOUT, "sources": [URL],
+            "composition": "вигадано", "fat_g": 30}
+    res = cr.build_result(data, NAME, 150.0, {URL})
+    assert res.status == "розповідь" and res.sources == [URL] and "вигадано" not in res.text
+    assert res.text.startswith("СИР «GOUDA» НАРІЗКА СЛАЙСАМИ\n\nНідерландський сир типу Gouda") and "Склад" not in res.text
+    assert "Розповідь про сир" not in res.missing and "Склад" in res.missing
+
+
+def test_about_without_confirmed_sources_is_dropped():
+    res = cr.build_result(dict(GOOD, sources=["https://invented.example/x"]), NAME, 150.0, {URL})
+    assert res.status == "лише заголовок" and "Нідерландський" not in res.text and "розповідь без" in res.notes
+    assert cr.build_result({"match": "none", "heading": "СИР «GOUDA» НАРІЗКА", "about": ABOUT, "sources": [URL]},
+                           NAME, 150.0, {URL}).status == "лише заголовок"
+
+
+def test_advertising_and_medical_paragraphs_are_dropped_but_the_rest_stays():
+    about = ["Це найкращий сир у світі, ідеальний для будь-якого столу.", ABOUT[0], "Корисний для здоров'я та лікує застуду."]
+    res = cr.build_result(dict(GOOD, about=about), NAME, 150.0, {URL})
+    assert res.text.count("Нідерландський сир") == 1 and "найкращий" not in res.text and "лікує" not in res.text
+    assert "абзац відкинуто" in res.notes
+
+
+def test_status_full_requires_story_and_all_label_blocks():
+    assert cr.build_result(dict(GOOD), NAME, 150.0, {URL}).status == "повний"
+    assert cr.build_result(dict(GOOD, about=[]), NAME, 150.0, {URL}).status == "частковий"
+    assert cr.build_result(dict(GOOD, storage=None), NAME, 150.0, {URL}).status == "розповідь"
+
+
+def test_heading_without_quoted_brand_is_accepted_when_it_keeps_the_product_words():
+    name = 'Сир "Castello" Danablu Extra 150 г'
+    assert cr.build_result({"match": "none", "heading": "СИР DANABLU EXTRA"}, name, None, None).ok
+    assert not cr.build_result({"match": "none", "heading": "СИР ПЛІСНЯВИЙ"}, name, None, None).ok
+
+
+def test_foreign_cheeses_come_first_but_domestic_latin_brands_do_not(tmp_path, monkeypatch):
+    monkeypatch.delenv("DESC_ONLY_KINDS")
+    rows = [(1, "Сир Сметанковий ТМ КОМО", "Тульчинка/Ферма"), (2, "Сир Gouda Arla 150 г", "Азимут"),
+            (3, "Сир Сулугуні ZhytarOK", "ZhytarOK TM"), (4, "Сир Едам Mlekovita", "Смаковіта"),
+            (5, "Сир Голландський Ферма", "Тульчинка/Ферма")]
+    df = pd.DataFrame([[c, n, g, "", "+", float("nan"), False] for c, n, g in rows],
+                      columns=["code", "name", "group", "desc", "available", "weight", "archived"])
+    got, _ = descriptions.pick_targets(df, DescStore(str(tmp_path / "d.json")), 10)
+    assert list(got["code"]) == [2, 4, 3, 1, 5]                           # іноземні (за групами), потім українські
+    assert descriptions.is_foreign("Сир Gouda Arla", "Азимут") and not descriptions.is_foreign("Сир ZhytarOK", "ZhytarOK TM")
+    monkeypatch.setenv("DESC_FOREIGN_FIRST", "false")
+    got, _ = descriptions.pick_targets(df, DescStore(str(tmp_path / "d.json")), 10)
+    assert list(got["code"]) == [3, 2, 4, 1, 5]                           # без пріоритету — просто за групами

@@ -240,6 +240,18 @@ def store_path() -> str:
 
 # ---------- відбір товарів ----------
 
+# групи Prom, про які точно відомо, що вони українські (латиниця в назві бренду там не робить сир іноземним)
+DOMESTIC_GROUPS = ("ZhytarOK TM, Тульчинка/Ферма, Пирятин/Яготин, Гайсинський МЗ, Житомирський МЗ, Новотроя/Ратушний, "
+                   "Вись, Салтівський МК, КОМО/Клуб Сиру, Звени Гора, Алтинівський Сирзавод (ТМ Pastourelle), "
+                   "Матвійчук Олег")
+
+
+def is_foreign(name: str, group: str) -> bool:
+    """Іноземний сир — груба ознака: у назві є латинське слово (бренд) і група не в списку українських
+    (DESC_DOMESTIC_GROUPS через кому). Бренди кирилицею так не розпізнаються."""
+    domestic = {g.strip() for g in os.getenv("DESC_DOMESTIC_GROUPS", DOMESTIC_GROUPS).split(",") if g.strip()}
+    return bool(re.search(r"[A-Za-z]{3,}", name)) and group.strip() not in domestic
+
 def pick_targets(df: pd.DataFrame, store: DescStore, limit: int) -> tuple[pd.DataFrame, int]:
     """Товари без опису (не в архіві), яких ще немає в сховищі. Спершу ті, що в наявності;
     DESC_ONLY_KINDS (за замовчуванням «Сир», порожньо — усі) обмежує вид товару за першим словом назви.
@@ -252,12 +264,15 @@ def pick_targets(df: pd.DataFrame, store: DescStore, limit: int) -> tuple[pd.Dat
         todo = todo[todo["name"].str.match(r"^\s*(?:" + "|".join(map(re.escape, kinds)) + r")\b", case=False)]
     todo = todo[[not store.has_fresh(int(r.code), r.name) and store.attempts(int(r.code), r.name) < MAX_ATTEMPTS
                  for r in todo.itertuples()]]
-    todo = todo.assign(_stock=(todo["available"].astype(str).str.strip() != "+")) \
-               .sort_values(["_stock", "group", "code"])
+    todo = todo.assign(_stock=(todo["available"].astype(str).str.strip() != "+"),
+                       _local=[not is_foreign(r.name, r.group) for r in todo.itertuples()])
+    if os.getenv("DESC_FOREIGN_FIRST", "true").lower() != "true":
+        todo["_local"] = False
+    todo = todo.sort_values(["_stock", "_local", "group", "code"])
     return todo.head(limit), len(todo)
 
 
-STATUS_RANK = {"повний": 0, "частковий": 1, "лише заголовок": 2}
+STATUS_RANK = {"повний": 0, "розповідь": 1, "частковий": 2, "лише заголовок": 3}
 
 
 def pick_reminders(df: pd.DataFrame, store: DescStore, limit: int, today: date | None = None) -> list[dict]:
@@ -282,7 +297,7 @@ def pick_reminders(df: pd.DataFrame, store: DescStore, limit: int, today: date |
         last = date.fromisoformat(it.get("last_sent") or it.get("generated") or today.isoformat())
         if (today - last).days < gap:
             continue
-        found.append((STATUS_RANK.get(it.get("status", "частковий"), 1), last, code, it))
+        found.append((STATUS_RANK.get(it.get("status", "частковий"), 2), last, code, it))
     found.sort(key=lambda t: t[:3])
     return [{**it, "code": code, "reminder": True} for _, _, code, it in found[:limit]]
 
@@ -469,14 +484,16 @@ def format_message(n: int, left: int, footer: str, when: date | None = None, row
     lines = [f"📝 <b>Чернетки описів{' сирів' if research else ''}</b> — {when:%d.%m.%Y}",
              f"У файлі: <b>{n}</b> товарів без опису.", ""]
     if research:
-        counts = {k: sum(1 for r in rows if r.get("status") == k) for k in ("повний", "частковий", "лише заголовок")}
+        counts = {k: sum(1 for r in rows if r.get("status") == k)
+                  for k in ("повний", "розповідь", "частковий", "лише заголовок")}
         reminders = sum(1 for r in rows if r.get("reminder"))
         if reminders:
             lines[1] = (f"У файлі: <b>{n}</b> сирів: нових {n - reminders}, нагадувань {reminders} "
                         "(опису в Промі ще немає).")
-        lines += [f"Повних: {counts['повний']} · часткових: {counts['частковий']} · лише заголовок: {counts['лише заголовок']}",
-                  "Дані взяті з інтернету. ⚠️ <b>Перед публікацією звіряйте з етикеткою</b>: у колонці «Джерела» — "
-                  "сторінки, звідки взято склад і калорійність; що не знайдено — у колонці «Не знайдено»."]
+        lines += [f"Повних: {counts['повний']} · розповідь без етикетки: {counts['розповідь']} · лише етикетка: {counts['частковий']} · "
+                  f"лише заголовок: {counts['лише заголовок']}",
+                  "Тексти зібрані з інтернету й переказані. ⚠️ <b>Перед публікацією звіряйте</b>: у колонці «Джерела» — "
+                  "сторінки, звідки взято факти; що не знайдено — у колонці «Не знайдено»."]
     else:
         lines += ["Колонка «Опис» містить лише заголовок і короткий текст за назвою — її можна вставляти в 1С.",
                   "⚠️ <b>Склад, калорійність і умови зберігання бот не вигадує</b> — їх треба взяти з етикетки "
