@@ -352,3 +352,20 @@ def test_window_puts_foreign_first(monkeypatch):
                       columns=["code", "uid", "name", "group", "available", "desc", "weight", "archived"])
     got, _ = descriptions.pick_window(df, 5, date(2026, 10, 30))
     assert list(got["code"]) == [2, 3]
+
+
+
+def test_identical_paragraphs_across_cheeses_are_flagged_in_notes():
+    same = "Суміш уварюють кілька годин, доки не википить вода, а молочні цукри карамелізуються."
+    made = {1: {"text": f"ЗАГОЛОВОК 1\n\n{same}\n\nУнікальний абзац першого сиру, який довший за шістдесят символів точно.", "notes": ""},
+            2: {"text": f"ЗАГОЛОВОК 2\n\n{same} \n\nЗовсім інший абзац другого сиру, також довший за шістдесят символів.", "notes": "Є"},
+            3: {"text": "ЗАГОЛОВОК 3\n\nТретій сир має лише власний абзац, який не повторюється в інших описах жодним чином.", "notes": ""}}
+    descriptions.flag_duplicate_paragraphs(made)
+    assert "кодами 2" in made[1]["notes"] and "кодами 1" in made[2]["notes"] and made[2]["notes"].startswith("Є")
+    assert made[3]["notes"] == ""
+    descriptions.flag_duplicate_paragraphs(made)                      # повторний виклик не дублює застереження
+    assert made[1]["notes"].count("збігається") == 1
+
+
+def test_request_contains_search_strategy():
+    assert "СТРАТЕГІЯ" in cr.SYSTEM and "parmigianoreggiano.com" in cr.SYSTEM and "ОДНАКОВИХ" in cr.SYSTEM.upper()

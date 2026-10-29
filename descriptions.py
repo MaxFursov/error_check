@@ -684,6 +684,21 @@ def ingest(reply_path: str, source: str | None = None, dry_run: bool = False) ->
     return _deliver(df, store, made, footer, dry_run, without_telegram=True)
 
 
+def flag_duplicate_paragraphs(made: dict) -> None:
+    """Однакові абзаци розповіді в кількох сирах одного файлу погані для пошукової видачі — додаємо застереження в «Примітки»."""
+    seen: dict[str, list[int]] = {}
+    for code, item in made.items():
+        for para in item["text"].split("\n\n")[1:]:
+            if len(para) > 60 and "\n" not in para and not para.startswith(("Склад", "Умови")):
+                seen.setdefault(re.sub(r"\W+", " ", para.casefold()).strip(), []).append(code)
+    for codes in (c for c in seen.values() if len(c) > 1):
+        for code in codes:
+            others = ", ".join(str(c) for c in codes if c != code)
+            note = f"Абзац збігається з кодами {others}: перефразуйте, щоб описи не дублювались."
+            if note not in made[code].get("notes", ""):
+                made[code]["notes"] = (made[code].get("notes", "") + " " + note).strip()
+
+
 def ingest_research(path: str, source: str | None = None, dry_run: bool = False) -> int:
     """JSON {"код": {...відповідь у форматі cheese_research...}} -> та сама перевірка й складання HTML,
     збереження й xlsx. Для режиму, коли дані з інтернету шукала сама сесія Claude (без API-ключа)."""
@@ -711,7 +726,10 @@ def ingest_research(path: str, source: str | None = None, dry_run: bool = False)
         made[code] = {"text": res.text, **extra}
         if not dry_run:
             store.add(code, r.uid, r.name, r.group, r.available, res.text, **extra)
+    flag_duplicate_paragraphs(made)
     if not dry_run:
+        for code, item in made.items():
+            store.data["items"][str(code)]["notes"] = item["notes"]
         store.data["last_run"] = date.today().isoformat()
         store.save()
     footer = "✍️ Дані з інтернету шукала сесія Claude (без API-ключа)"
