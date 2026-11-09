@@ -19,6 +19,7 @@ COLUMNS = {
     "Наявність": "available",
     "Кількість": "qty",
     "Назва_групи": "group",
+    "Вага": "weight",                    # середня вага позиції, кг
 }
 REQUIRED = ("code", "name", "price", "unit", "group")
 
@@ -72,9 +73,12 @@ def read_catalog(data: bytes) -> pd.DataFrame:
     df["name"] = df["name"].fillna("").astype(str)
     df["group"] = df["group"].fillna("").astype(str)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
     df["archived"] = (df["group"].str.strip().str.startswith("Я!")
                       | df["name"].str.contains(WITHDRAWN_NAME_RE, case=False, regex=True))
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    df.attrs["has_weight_column"] = "Вага" in raw.columns
+    return df
 
 
 def load_catalog(url: str) -> pd.DataFrame:

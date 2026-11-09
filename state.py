@@ -17,7 +17,8 @@ class State:
     def __init__(self, path: str):
         self.path = Path(path)
         self.data = {"ai_checked": {}, "reported": [], "prices": {}, "ai_issues": {}, "last_run": None,
-                     "ai_spend": {"month": "", "usd": 0.0}}
+                     "ai_spend": {"month": "", "usd": 0.0},
+                     "weight_last_run": None, "weight_prev": []}
         self.seeded = False
         if not self.path.exists() and SEED_PATH.exists():
             # Перший запуск на новому сервері: беремо готовий кеш перевірених назв
@@ -79,6 +80,22 @@ class State:
 
     def new_issues(self, keys: list[str]) -> set[str]:
         return set(keys) - set(self.data["reported"])
+
+    def weight_days_since(self, today: date) -> int | None:
+        last = self.data.get("weight_last_run")
+        return (today - date.fromisoformat(last)).days if last else None
+
+    def mark_weight_sent(self, missing_uids: list[int], today: date | None = None) -> None:
+        """Зберігає дату звіту про вагу й список позицій без ваги (для порівняння наступного разу).
+        Перечитує файл перед записом, щоб не затерти зміни паралельної перевірки помилок."""
+        if self.path.exists():
+            try:
+                self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
+        self.data["weight_last_run"] = (today or date.today()).isoformat()
+        self.data["weight_prev"] = sorted(set(int(u) for u in missing_uids))
+        self._write()
 
     def _write(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
