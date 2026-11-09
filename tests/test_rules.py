@@ -118,4 +118,20 @@ def test_issues_carry_unique_id_and_duplicate_name_points_to_other_id():
     issues = found(df, "duplicate_name")
     by_code = {i.code: i for i in issues}
     assert by_code[1].uid == 11 and by_code[2].uid == 21
-    assert "ID 21" in by_code[1].message and "ID 11" in by_code[2].message
+    assert "код 21" in by_code[1].message and "код 11" in by_code[2].message
+
+
+def test_duplicate_and_missing_product_code_use_unique_identifier():
+    df = make((1, "Сир Гауда одна", 100, "кг", "Г", "+"), (2, "Сир Едам друга", 100, "кг", "Г", "+"),
+              (3, "Сир Бри третя", 100, "кг", "Г", "+"), (4, "Сир Фета четверта", 100, "кг", "Г", "+"))
+    df["uid"] = pd.array([700, 700, 800, pd.NA], dtype="Int64")
+    dup = found(df, "duplicate_code")
+    assert {i.uid for i in dup} == {700} and len(dup) == 2 and "700" in dup[0].message
+    missing = found(df, "missing_code")
+    assert [i.code for i in missing] == [4] and missing[0].severity == rules.ERROR
+
+
+def test_same_internal_code_with_different_unique_ids_is_not_a_duplicate():
+    df = make((1, "Сир Гауда одна", 100, "кг", "Г", "+"), (1, "Сир Едам друга", 100, "кг", "Г", "+"))
+    df["uid"] = pd.array([700, 701], dtype="Int64")
+    assert found(df, "duplicate_code") == []

@@ -25,15 +25,15 @@ ROWS = [
 
 def test_finds_missing_weight_only_among_active_and_treats_zero_as_missing():
     m = wr.find_missing(make(ROWS))
-    assert set(m["ident"]) == {102, 103, 104, 6}
-    assert 105 not in set(m["ident"]) and 101 not in set(m["ident"])
+    assert set(m["ident"]) == {"102", "103", "104", ""}          # у позиції без коду — порожньо, не внутрішній код
+    assert "105" not in set(m["ident"]) and "101" not in set(m["ident"])
     assert list(m["in_stock"])[:3] == [True, True, True]          # спочатку ті, що в наявності
 
 
 def test_report_is_single_framed_message_with_counts_and_diff():
     df = make(ROWS)
     m = wr.find_missing(df)
-    text = wr.format_report(m, int((~df["archived"]).sum()), prev_ids={102, 999},
+    text = wr.format_report(m, int((~df["archived"]).sum()), prev_ids={2, 999},
                             when=datetime(2026, 11, 9, 8, 15))
     assert text.startswith("━") and "КІНЕЦЬ ЗВІТУ" in text and text.rstrip().endswith("━━━━━━━━━━━━━━━━━━━━")
     assert "Без ваги: <b>4</b>" in text and "у наявності: <b>3</b>" in text
@@ -49,15 +49,15 @@ def test_big_report_fits_into_one_telegram_message():
     assert len(text) <= 4096
 
 
-def test_csv_file_has_id_and_original_code():
+def test_csv_file_has_only_product_code_column():
     name, data, caption = wr.build_file(wr.find_missing(make(ROWS)), datetime(2026, 11, 9))
     assert name == "no_weight_2026-11-09.csv"
-    lines = data.decode("utf-8-sig").splitlines()
-    assert lines[0].startswith("ID,Назва")
+    text = data.decode("utf-8-sig")
+    lines = text.splitlines()
+    assert lines[0] == "Код товару,Назва,Група,Одиниця,В наявності"
     ids = [l.split(",")[0] for l in lines[1:]]
-    assert set(ids) == {"102", "103", "104", "6"}              # для позиції без ID — Код_товару
-    assert ids.index("103") == len(ids) - 1                    # «немає в наявності» — в кінці списку
-    assert "Позиція без ID" in data.decode("utf-8-sig") and "4" in caption
+    assert sorted(ids) == ["", "102", "103", "104"]            # внутрішнього Код_товару у файлі немає
+    assert "Позиція без ID" in text and "4" in caption
 
 
 def test_due_every_three_days_and_state_roundtrip(tmp_path, monkeypatch):

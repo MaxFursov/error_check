@@ -29,9 +29,9 @@ def test_big_report_fits_into_single_telegram_message_with_clear_borders():
 
 
 def test_small_report_lists_examples_per_category():
-    issues = [Issue(50, "Cир плавлений", "mixed_alphabet", ERROR, "змішано", "Cир → Сир")]
+    issues = [Issue(50, "Cир плавлений", "mixed_alphabet", ERROR, "змішано", "Cир → Сир", uid=6655)]
     text = checker.format_report(issues, {issues[0].key}, 100)
-    assert "<code>50</code>" in text and "Cир → Сир" in text
+    assert "<code>6655</code>" in text and "<code>50</code>" not in text and "Cир → Сир" in text
 
 
 def test_files_are_new_errors_plus_all_open():
@@ -49,17 +49,21 @@ def test_single_file_when_everything_is_new():
     assert len(checker.build_files([i], {i.key})) == 1
 
 
-def test_report_and_files_show_unique_id_not_internal_code():
+def test_report_and_files_show_only_the_product_code_never_the_internal_one():
     i = Issue(514, "Cир плавлений", "mixed_alphabet", ERROR, "змішано", "Cир → Сир", uid=184)
     text = checker.format_report([i], {i.key}, 10)
-    assert "<code>184</code>" in text and "<code>514</code>" not in text
-    csv_text = checker.to_csv([i], {i.key}).decode("utf-8-sig").splitlines()
-    assert csv_text[0].startswith("ID,") and csv_text[1].startswith("184,") and csv_text[1].endswith(",514")
+    assert "<code>184</code>" in text and "514" not in text
+    csv_text = checker.to_csv([i], {i.key}).decode("utf-8-sig")
+    header, row = csv_text.splitlines()[:2]
+    assert header.startswith("Код товару,") and "Код_товару" not in header
+    assert row.startswith("184,") and "514" not in csv_text
 
 
-def test_falls_back_to_code_when_no_unique_id():
-    i = Issue(542, "Ковбаса Київська", "short_name", ERROR, "x")      # uid немає (напр., архівний рядок)
-    assert i.ident == 542 and "<code>542</code>" in checker.format_report([i], {i.key}, 1)
+def test_issue_without_product_code_shows_dash_not_internal_code():
+    i = Issue(542, "Ковбаса Київська", "short_name", ERROR, "x")      # Унікального ідентифікатора немає
+    assert i.ident == "—"
+    text = checker.format_report([i], {i.key}, 1)
+    assert "<code>—</code>" in text and "542" not in text
 
 
 def test_report_goes_to_every_chat_and_one_failure_does_not_block_others(monkeypatch):

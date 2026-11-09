@@ -24,8 +24,7 @@ def find_missing(df: pd.DataFrame) -> pd.DataFrame:
     act = df[~df["archived"]]
     miss = act[act["weight"].isna() | (act["weight"] <= 0)].copy()
     miss["in_stock"] = miss["available"] == "+"
-    ident = miss["uid"].where(miss["uid"].notna(), miss["code"])
-    miss["ident"] = ident.astype(int)
+    miss["ident"] = miss["uid"].map(lambda v: "" if pd.isna(v) else str(int(v)))   # код товару
     return miss.sort_values(["in_stock", "group", "name"], ascending=[False, True, True])
 
 
@@ -34,7 +33,7 @@ def format_report(missing: pd.DataFrame, total_active: int, prev_ids: set[int] |
     when = when or datetime.now()
     n = len(missing)
     stock = int(missing["in_stock"].sum())
-    ids = set(missing["ident"])
+    ids = set(int(c) for c in missing["code"])   # для порівняння між звітами — стабільний внутрішній ключ
     lines_head = [
         LINE, "⚖️ <b>ПОЗИЦІЇ БЕЗ СЕРЕДНЬОЇ ВАГИ</b>", f"📅 {when:%d.%m.%Y, %H:%M}", LINE,
         f"Активних позицій: <b>{total_active}</b>",
@@ -57,7 +56,7 @@ def format_report(missing: pd.DataFrame, total_active: int, prev_ids: set[int] |
         if k and len(ex):
             lines.append("\n<b>У наявності, приклади:</b>")
             for r in ex.head(k).itertuples():
-                lines.append(f"• <code>{r.ident}</code> {html.escape(r.name.strip()[:55])}")
+                lines.append(f"• <code>{r.ident or '—'}</code> {html.escape(r.name.strip()[:55])}")
             if len(ex) > k:
                 lines.append(f"   …і ще {len(ex) - k} — у файлі")
         lines += ["\n📎 <b>Повний список — у файлі нижче</b>", LINE, "<b>КІНЕЦЬ ЗВІТУ</b>", LINE]
@@ -74,10 +73,9 @@ def build_file(missing: pd.DataFrame, when: datetime | None = None) -> tuple[str
     day = (when or datetime.now()).strftime("%Y-%m-%d")
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "Назва", "Група", "Одиниця", "В наявності", "Код_товару"])
+    w.writerow(["Код товару", "Назва", "Група", "Одиниця", "В наявності"])
     for r in missing.itertuples():
-        w.writerow([r.ident, r.name.strip(), r.group.strip(), r.unit,
-                    "так" if r.in_stock else "ні", r.code])
+        w.writerow([r.ident, r.name.strip(), r.group.strip(), r.unit, "так" if r.in_stock else "ні"])
     return (f"no_weight_{day}.csv", buf.getvalue().encode("utf-8-sig"),
             f"📎 Позиції без середньої ваги: {len(missing)}")
 
@@ -130,5 +128,5 @@ def run_weight_report(source: str | None = None, dry_run: bool = False) -> bool:
         return True
     if not notifier.send_report(text, [build_file(missing)]):
         return False   # не зберігаємо — повторимо при наступному запуску
-    state.mark_weight_sent(list(missing["ident"]))
+    state.mark_weight_sent([int(c) for c in missing["code"]])
     return True

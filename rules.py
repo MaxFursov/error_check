@@ -45,9 +45,10 @@ class Issue:
     uid: int | None = None   # «Унікальний_ідентифікатор» — ID, який бачить користувач
 
     @property
-    def ident(self) -> int:
-        """ID для показу: Унікальний_ідентифікатор, а якщо його немає — Код_товару."""
-        return self.uid if self.uid is not None else self.code
+    def ident(self) -> str:
+        """Код товару для показу — Унікальний_ідентифікатор («—», якщо його немає).
+        Внутрішній Код_товару людям не показуємо: це інше число і лише плутає."""
+        return str(self.uid) if self.uid is not None else "—"
 
     @property
     def key(self) -> str:
@@ -91,10 +92,16 @@ def check_short_name(df: pd.DataFrame) -> list[Issue]:
 
 
 def check_duplicate_code(df: pd.DataFrame) -> list[Issue]:
+    """Код товару = Унікальний_ідентифікатор. Має бути унікальним і заповненим."""
+    if "uid" not in df.columns:
+        return []
     act = _active(df)
-    dup = act[act["code"].duplicated(keep=False)]
-    return [mk(r, "duplicate_code", ERROR, f"Повторюється код товару {r.code} (колонка «Код_товару»)")
-            for r in dup.itertuples()]
+    with_uid = act[act["uid"].notna()]
+    dup = with_uid[with_uid["uid"].duplicated(keep=False)]
+    out = [mk(r, "duplicate_code", ERROR, f"Код товару {_uid(r)} повторюється") for r in dup.itertuples()]
+    out += [mk(r, "missing_code", ERROR, "Не вказано код товару (Унікальний_ідентифікатор)")
+            for r in act[act["uid"].isna()].itertuples()]
+    return out
 
 
 def _norm_name(name: str) -> str:
@@ -109,9 +116,9 @@ def check_duplicate_name(df: pd.DataFrame) -> list[Issue]:
         if len(codes) < 2:
             continue
         for r in grp.itertuples():
-            others = ", ".join(str(_uid(o) or o.code) for o in grp.itertuples() if o.code != r.code)
+            others = ", ".join(str(_uid(o) or "—") for o in grp.itertuples() if o.code != r.code)
             out.append(mk(r, "duplicate_name", WARNING,
-                             f"Така сама назва в іншого товару (ID {others})"))
+                             f"Така сама назва в іншого товару (код {others})"))
     return out
 
 

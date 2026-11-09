@@ -30,6 +30,7 @@ RULE_TITLES = {
     "short_name": "Занадто коротка назва",
     "missing_price": "Немає ціни",
     "duplicate_code": "Дубль коду товару",
+    "missing_code": "Немає коду товару",
     "duplicate_name": "Дубль назви",
     "price_outlier": "Підозріла ціна",
     "price_jump": "Різка зміна ціни",
@@ -135,10 +136,10 @@ def format_report(issues: list[Issue], new_keys: set[str], total: int, footer: s
 def to_csv(issues: list[Issue], new_keys: set[str] | None = None) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "Нова", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція", "Код_товару"])
-    for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.ident)):
-        w.writerow([i.ident, "так" if new_keys is None or i.key in new_keys else "ні", i.severity,
-                    RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion, i.code])
+    w.writerow(["Код товару", "Нова", "Важливість", "Правило", "Назва", "Проблема", "Пропозиція"])
+    for i in sorted(issues, key=lambda i: (SEV_ORDER[i.severity], i.rule, i.uid or 0)):
+        w.writerow([i.ident if i.uid is not None else "", "так" if new_keys is None or i.key in new_keys else "ні", i.severity,
+                    RULE_TITLES.get(i.rule, i.rule), i.name.strip(), i.message, i.suggestion])
     return buf.getvalue().encode("utf-8-sig")  # BOM, щоб Excel бачив кирилицю
 
 
