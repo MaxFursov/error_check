@@ -88,6 +88,17 @@ def due(state: State, today: date | None = None) -> bool:
     return passed is None or passed >= every
 
 
+def adopt_existing_state(state: State, today: date | None = None) -> bool:
+    """Бот, що вже працював до появи цього звіту (є файл стану, але немає дати звіту про вагу),
+    не шле звіт одразу при оновленні — перший звіт відправляють вручну або він піде за
+    розкладом через N днів. Так оновлення не дублює вже надісланий вручну звіт.
+    Повертає True, якщо стан щойно «усиновлено» (звіт цього разу не потрібен)."""
+    if state.path.exists() and state.data.get("weight_last_run") is None:
+        state.mark_weight_sent([], today)
+        return True
+    return False
+
+
 def run_weight_report(source: str | None = None, dry_run: bool = False) -> bool:
     """source — URL або локальний xlsx. dry_run: лише показати, нічого не слати й не зберігати."""
     state = State(os.getenv("STATE_PATH", "state.json"))
@@ -111,7 +122,7 @@ def run_weight_report(source: str | None = None, dry_run: bool = False) -> bool:
 
     missing = find_missing(df)
     total = int((~df["archived"]).sum())
-    prev = set(state.data.get("weight_prev") or []) if state.data.get("weight_last_run") else None
+    prev = set(state.data["weight_prev"]) if state.data.get("weight_prev") else None
     text = format_report(missing, total, prev)
     log.info("Без ваги: %d з %d активних", len(missing), total)
     if dry_run:

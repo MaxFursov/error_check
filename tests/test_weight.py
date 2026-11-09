@@ -78,3 +78,18 @@ def test_mark_weight_sent_does_not_overwrite_error_check_state(tmp_path):
     b.mark_weight_sent([1], today=date(2026, 11, 9))         # звіт про вагу не має його затерти
     final = State(str(tmp_path / "s.json"))
     assert final.data["reported"] == ["k1"] and final.data["weight_prev"] == [1]
+
+
+def test_upgrade_of_running_bot_starts_clock_instead_of_resending(tmp_path):
+    path = str(tmp_path / "s.json")
+    State(path).save([], {}, today=date(2026, 11, 8))            # бот уже працював (є стан), звіту про вагу не було
+    st = State(path)
+    assert wr.adopt_existing_state(st, date(2026, 11, 9)) is True
+    st = State(path)
+    assert not wr.due(st, date(2026, 11, 10)) and wr.due(st, date(2026, 11, 12))
+    assert wr.adopt_existing_state(st, date(2026, 11, 12)) is False
+
+
+def test_brand_new_install_sends_immediately(tmp_path):
+    st = State(str(tmp_path / "new.json"))                       # файла стану ще немає
+    assert wr.adopt_existing_state(st) is False and wr.due(st)

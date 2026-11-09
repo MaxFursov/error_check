@@ -39,7 +39,12 @@ def scheduled_check():
 def scheduled_weight_report():
     """Щодня перевіряє, чи минуло WEIGHT_REPORT_EVERY_DAYS днів з останнього звіту про вагу."""
     try:
-        if not weight_report.due(State(os.getenv("STATE_PATH", "state.json"))):
+        state = State(os.getenv("STATE_PATH", "state.json"))
+        if weight_report.adopt_existing_state(state):
+            log.info("Звіт про вагу: бот оновлено — відлік %s дн. починається сьогодні",
+                     os.getenv("WEIGHT_REPORT_EVERY_DAYS", "3"))
+            return
+        if not weight_report.due(state):
             log.info("Звіт про вагу: ще рано — пропускаю")
             return
         weight_report.run_weight_report()
